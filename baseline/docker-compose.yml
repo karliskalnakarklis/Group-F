@@ -1,0 +1,44 @@
+# The legacy monolith: one service and one database. Start it with 'make up-baseline'.
+name: pos
+
+services:
+  gateway:
+    build: ./monolith
+    ports: ["8000:8000"]
+    environment:
+      DB_HOST: legacy-db
+      DB_PASSWORD: pos
+      SEED_PATH: /shared/seed.json
+    volumes:
+      - ../shared:/shared:ro
+      - calllogs:/logs
+    networks: [legacy]
+    depends_on:
+      legacy-db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 2s
+      retries: 30
+
+  legacy-db:
+    image: mariadb:11.4
+    environment:
+      MARIADB_DATABASE: pos
+      MARIADB_USER: pos
+      MARIADB_PASSWORD: pos
+      MARIADB_ROOT_PASSWORD: root
+    labels:
+      pos.role: store
+      pos.owner: gateway
+    networks: [legacy]
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 2s
+      retries: 60
+
+volumes:
+  calllogs:
+
+networks:
+  legacy:
