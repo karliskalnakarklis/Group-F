@@ -43,13 +43,24 @@ variants.
 | Service | Responsibility | Owns (legacy tables) | Store |
 |---------|----------------|----------------------|-------|
 | gateway | routing, composition | none | none |
-| | | | |
+| people | customers and employees | `customer_info`, `employee_info` | `people-db` |
+| stores | stores, registers, register sessions, Z-report | `stores`, `store_registers`, `registers_table` | `stores-db` |
+| inventory | products, stock, vendors, purchase orders | `product_inventory`, `vendorinfo`, `orders_ticket`, `orders` | `inventory-db` |
+| sales | sales, returns, gift cards, tax rate, sales report | `ticket_system`, `cart_inprogress`, `item_list`, `ticket_gift_payment`, `return_table`, `return_items`, `gift_card`, `tax_table` | `sales-db` |
 
 ### Components
 
 ```mermaid
 flowchart LR
     client[Client] --> gw[gateway]
+    gw --> people & stores & inventory & sales
+    sales --> stores & people & inventory
+    stores --> people & sales
+    inventory --> people
+    people --> pdb[(people-db)]
+    stores --> sdb[(stores-db)]
+    inventory --> idb[(inventory-db)]
+    sales --> sadb[(sales-db)]
 ```
 
 ### Use case flows
@@ -61,8 +72,39 @@ flowchart LR
 sequenceDiagram
     participant C as Client
     participant G as gateway
+    participant S as sales
+    participant ST as stores
+    participant P as people
+    participant I as inventory
     C->>G: POST /sales
+    G->>S: POST /sales
+    S->>ST: open session of the register?
+    S->>P: employee exists?
+    S->>P: customer exists? (if customer)
+    S->>I: price, cost and stock of the products
+    Note over S: compute totals with tax_table,<br/>check payments and gift card balances
+    S->>I: take stock
+    S->>P: add points (if customer)
+    Note over S: one transaction: ticket, cart, lines,<br/>gift card debit (checked again), payments
+    S-->>G: 201 sale
     G-->>C: 201 sale
+```
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant G as gateway
+    participant ST as stores
+    participant P as people
+    participant S as sales
+    C->>G: POST /registers/{r}/close
+    G->>ST: POST /registers/{r}/close
+    ST->>P: employee exists?
+    Note over ST: lock the open session
+    ST->>S: totals of the session
+    Note over ST: compute cash_expected and difference,<br/>close the session
+    ST-->>G: 200 Z-report
+    G-->>C: 200 Z-report
 ```
 
 ### All-or-nothing
@@ -70,11 +112,31 @@ sequenceDiagram
 > A failed request changes nothing (contract). How do you guarantee this when
 > a sale touches stock, gift cards and points in different services?
 
+We follow the shared rule: checks first, then the writes in other services,
+then the leader's own transaction. If a step fails, the earlier writes are
+undone in reverse order.
+
+- **Checkout:** sales takes stock (inventory), then adds points (people), then
+  writes the sale in its own transaction. If adding points fails, sales gives
+  the stock back. If its own transaction fails, sales takes the points back
+  and then gives the stock back.
+- **Gift cards:** they belong to sales, so the debit is part of the sale's own
+  transaction. The balance is checked again there under a row lock, so it
+  never goes below zero.
+- **Return:** sales adds the stock back (inventory), then writes the return.
+  If its own transaction fails, sales takes the stock again.
+- **Goods receipt:** stock and order status are both in inventory, so one
+  transaction is enough.
+
 ### Failure behaviour
 
 | What fails | What happens | Why this is acceptable or not |
 |------------|--------------|-------------------------------|
-| | | |
+| people | No sale, return, register open or close, purchase order or receipt (the employee check fails). Customer endpoints fail. | Not acceptable for the store manager: every till stops. This is the cost of one owner per table and no copies. |
+| stores | No sale, return, register open or close, or sales report. | Not acceptable for the store manager: sales cannot check the register session. |
+| inventory | No sale, return, product lookup, purchase order or receipt. | Expected: every sale needs prices and stock. |
+| sales | No sale, return, gift card, sales report or Z-report. | Expected: sales is the core of the till. |
+| an undo fails | Data stays half done, for example stock taken without a sale. The service logs an error. | Known gap, accepted for this assignment. Rare, because the leader's own transaction comes last. |
 
 ---
 
