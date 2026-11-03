@@ -1,10 +1,11 @@
-# AI log: other parts (design, findings fixes, DDD analysis, report)
+# AI log: other uses of AI
 
-The code of both variants is logged in [`variant-a.md`](variant-a.md) and
-[`variant-b.md`](variant-b.md). This file covers the places where we used AI
-for anything else.
+Besides generating the code (see [`variant-a.md`](variant-a.md) and
+[`variant-b.md`](variant-b.md)), we used a coding agent for the design,
+for planning, for the findings, for running the measurements and for parts
+of the report. Each of us summarises their own sessions below.
 
-The prompts here are **summarised, not verbatim**. Most of these sessions were
+The prompts are **summarised, not verbatim**. Most of these sessions were
 long back-and-forth chats where we pasted parts of our own docs, asked
 questions and corrected the answers, so a verbatim list would be long and not
 very useful. We describe what we asked for and what we did with the result.
@@ -37,7 +38,76 @@ our spec and checking our text. The decisions are ours.
 
 ## Sessions
 
-### 1. Design of version 2, variant B
+The table below applies to the sessions listed with a session ID. The
+other sessions have their own table.
+
+Every session is kept by Claude Code under the session ID in the tables
+below, and can be exported as a full transcript on request.
+
+| Field | Value |
+|-------|-------|
+| Tool | Claude Code, in the Claude desktop app (Code tab), macOS |
+| Model and version | Claude Opus 5.5 (`claude-opus-5-5`), in every session below |
+| Date(s) | 2026-11-02 and 2026-11-03 |
+| Who drove the sessions | Karlis Kalnakarklis |
+| Input given | The repository as it was on `main` at the start of each session. The agent read `AGENTS.md`, `docs/assignment.md` and the other files it needed itself. |
+| How I used the output | I read every change before it was committed. Several drafts were cut back to the template or reverted (see the tables). All commits were made without a co-author line. |
+
+Times are local (CET).
+
+### Design of version 1
+
+| Session | When | What we asked | What the agent did | What we kept | Commit |
+|---------|------|---------------|--------------------|--------------|--------|
+| `856a898b` | 11-02, 20:33–21:52 | Explain the difference between variant A and B in business terms, then draft the design. | Explained the two cuts and corrected several of our assumptions: A does not reduce calls between services, it creates them; copies are optional in B, not required; B is not better in every way. Drafted the shared decisions and the variant A section. | The five shared decisions (taken from the template's guidance), the policy "no preparation for CR1 and CR2" (proposed by the agent, kept by us), the 4 services of variant A (people, stores, inventory, sales) and the all-or-nothing description. Everything the template did not ask for (extra explanations, a use case table) was removed at our request. | `9a779d4`, `1a9cf25` |
+| `c2f7207f` | 11-02, 21:53 | How good are the shared part and variant A so far? | Rated them: good so far, needs additions. | Nothing to commit. | – |
+
+### Planning and findings for version 1
+
+| Session | When | What we asked | What the agent did | What we kept | Commit |
+|---------|------|---------------|--------------------|--------------|--------|
+| `c81a5103`, `3a48d29a`, `302efed1` | 11-03, 18:58–19:19 | What are the next steps to finish v1? | Wrote a to-do table from the assignment and the git history. Ran the tests of both variants locally. | A shorter table in the assignment's own wording, with the work split: Karlis reviews A, Bozhidar reviews B. | – |
+| `b209e564` | 11-03, 19:21–19:46 | Review the variant A code against `design.md` and record what differs. | Read the code against the design and the contract and wrote the findings for A. Explained that fixing findings is optional and that findings are mainly what is actually wrong, not every difference from the design. Merged Bozhidar's B findings into the same structure. | One table per variant, short explanations. Finding A1 was reworded: the gap is in our design, and the agent's mistake was not to flag it. Decided which findings need a fix (A1, B1, B2). | `671335d` |
+| `d39ef92f` | 11-03, 19:47 | Do we need to fix the findings now? | Advised fixing before tagging `v1`, so that the fixes are not counted in the `v1` → `v2` change (`make impact`, C2). | We followed this order. The fixes themselves were made by Bozhidar (`34cd95d`). | – |
+
+### Fixes of the findings
+
+| Field | Value |
+|-------|-------|
+| Tool | Claude Code, in the Claude desktop app (Code tab), Windows 11 |
+| Model and version | Claude Opus 5.5 (`claude-opus-5-5`) |
+| Date(s) | 2026-11-03 |
+| Who drove the session | Bozhidar Chobanov |
+| Input given | [`findings.md`](findings.md) with our description of each finding and the fix we wanted, `docs/design.md`, the code of both variants |
+| Result | Fixes of A1, B1, B2: commit `34cd95d` (and the docs in `a71c3fb`). Fixes of A5, B6, B7: commit `5cc93b3` (and the docs in `1363d5c`). |
+
+**What we asked for (summarised):** for each finding, implement the fix we
+described (for example: key the receipts on a step key that the leader creates,
+not on the client's `X-Request-Id`; key the ledger on `sale_id` / `return_id`;
+add a migration step at start; call `take_back_points` before till opens its
+transaction), update `docs/design.md` so that it matches the code, and do not
+touch anything else.
+
+**What we changed or checked:** we repeated the same manual test that found
+each finding after the fix (same request id twice, upgrade from v1 to v2
+without a reset, five returns with customers paused) and ran the acceptance and
+conformance tests again. The text in the "Fix" column of `findings.md` is ours.
+
+### Measuring and tagging version 1
+
+| Session | When | What we asked | What the agent did | What we kept | Commit |
+|---------|------|---------------|--------------------|--------------|--------|
+| `0d90c615` | 11-03, 20:05–20:14 | Run the v1 measurements on this machine and finish v1. | Ran tests, conformance, `bench` and `blast` for A, B and the baseline. Pulled Bozhidar's latest findings first, then committed the results and tagged `v1`. The tag was moved once to include his commit. | All six result files. | `d7aae2d`, tag `v1` |
+| `d88927d8` | 11-03, 20:15 | What is left after v1? | Listed the open work: v2, the DDD analysis, the report, and the C4 script, which had not been written before v1 as `criteria.md` planned. | Plan for v2. | – |
+| `fb52d80f` | 11-03, 20:17–20:28 | Is v1 finished? Then write the C4 script and start the report. | Wrote a first C4 script, a code-size script and a draft of the report. | Nothing: we reverted everything from this session. | – |
+
+### Design of version 2
+
+| Session | When | What we asked | What the agent did | What we kept | Commit |
+|---------|------|---------------|--------------------|--------------|--------|
+| `733a2157` | 11-03, 20:43–21:07 | Does v2 need a design, or do we only point the agent at the change requests? Then draft v2 for variant A. | Said the assignment does not require a v2 design outright, but that without one the agent makes the design decisions that we measure. Drafted v2 for variant A, then merged Bozhidar's v2 design for B into the same structure. | A shorter v2 part without diagrams, split into "Version 1" and "Version 2". From Bozhidar's B part we removed code details and choices made only to change fewer lines, so that B reads as a plan like A. | `79d0258` |
+
+### Design of version 2, variant B
 
 | Field | Value |
 |-------|-------|
@@ -62,30 +132,14 @@ a return of a customer's sale fails when customers is down instead of using a
 second outbox, and that till stores the tier of a sale only as a value. The
 merge with variant A was done by hand.
 
-### 2. Fixes of the findings
+### Measuring version 2 and writing the report
 
-| Field | Value |
-|-------|-------|
-| Tool | Claude Code, in the Claude desktop app (Code tab), Windows 11 |
-| Model and version | Claude Opus 5.5 (`claude-opus-5-5`) |
-| Date(s) | 2026-11-03 |
-| Who drove the session | Bozhidar Chobanov |
-| Input given | [`findings.md`](findings.md) with our description of each finding and the fix we wanted, `docs/design.md`, the code of both variants |
-| Result | Fixes of A1, B1, B2: commit `34cd95d` (and the docs in `a71c3fb`). Fixes of A5, B6, B7: commit `5cc93b3` (and the docs in `1363d5c`). |
+| Session | When | What we asked | What the agent did | What we kept | Commit |
+|---------|------|---------------|--------------------|--------------|--------|
+| `722fc60e` | 11-03, 20:33–22:40 | Plan v2, run the v2 measurements, finish the C4 measurement and fill in the report. | Wrote the v2 to-do list and the build prompt for v2 (used by Bozhidar). Ran the v2 measurements, tagged `v2`, ran `make impact`. Wrote `bench/personal_data.sh` and ran it for both tags. Drafted report sections 2, 3, 4 (results), 7 (from Bozhidar's `domain.md`) and 8. Drafted Karlis's C5 rating from the design and the code. After both ratings were in, drafted sections 5 and 6. Removed leftover template guidance. | The measurements and the C4 script. Report sections 2–8. Karlis's C5 rating: drafted by the agent, checked and kept by Karlis; Bozhidar rated on his own. A first table for section 5 was reverted because we had not chosen a variant yet. The rule for adding up the weights in section 5 (the winner of a criterion gets its full weight, a tie splits it) was proposed by the agent, because `criteria.md` does not say how. The decision to write the C4 script after v2 and run it against both tags was made in this session. | `6c312cd`, `091ef38`, `13d8542`, `e8e55b9`, `641fd0b`, `55eb16d`, `31cae87`, `a0eb136`, `8885ad9`, tag `v2` |
+| `2f071973` | 11-03, 22:43 | Is the assignment finished, apart from section 2 of the report? Then summarise the sessions for this file. | Listed what was missing (report sections 1 and 9, the reason for the C4 change, the empty "Changes after `criteria-v1`" table, this file). Read the session history and drafted this file. | This file. | – |
 
-**What we asked for (summarised):** for each finding, implement the fix we
-described (for example: key the receipts on a step key that the leader creates,
-not on the client's `X-Request-Id`; key the ledger on `sale_id` / `return_id`;
-add a migration step at start; call `take_back_points` before till opens its
-transaction), update `docs/design.md` so that it matches the code, and do not
-touch anything else.
-
-**What we changed or checked:** we repeated the same manual test that found
-each finding after the fix (same request id twice, upgrade from v1 to v2
-without a reset, five returns with customers paused) and ran the acceptance and
-conformance tests again. The text in the "Fix" column of `findings.md` is ours.
-
-### 3. DDD analysis
+### DDD analysis
 
 | Field | Value |
 |-------|-------|
@@ -109,7 +163,7 @@ decision not to refine variant B in code after the analysis are ours. While
 checking it, we noticed that the undo of `receive_stock` in till subtracts
 stock without a check, the same kind of gap as A2.
 
-### 4. Report and other docs
+### Report and other docs
 
 The analysis, the results table and the recommendation in `docs/report.md` were
 written by us from our own measurements. We used Claude only for small things:
