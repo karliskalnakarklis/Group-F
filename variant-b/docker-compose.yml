@@ -1,0 +1,116 @@
+# Variant B: capability-aligned. Start it with 'make up-b'.
+# Four capabilities (till, purchasing, customers, reporting), each with its
+# own MariaDB, plus the gateway.
+name: pos
+
+x-app: &app
+  volumes:
+    - ../shared:/shared:ro
+    - calllogs:/logs
+  healthcheck:
+    test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+    interval: 2s
+    timeout: 3s
+    retries: 60
+
+x-db: &db
+  image: mariadb:11.4
+  environment:
+    MARIADB_DATABASE: pos
+    MARIADB_USER: pos
+    MARIADB_PASSWORD: pos
+    MARIADB_ROOT_PASSWORD: root
+  healthcheck:
+    test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+    interval: 2s
+    retries: 60
+
+services:
+  gateway:
+    <<: *app
+    build: { context: ., dockerfile: gateway/Dockerfile }
+    environment:
+      SERVICE_NAME: gateway
+    ports: ["8000:8000"]
+    networks: [backend]
+    depends_on:
+      till: { condition: service_healthy }
+      purchasing: { condition: service_healthy }
+      customers: { condition: service_healthy }
+      reporting: { condition: service_healthy }
+
+  till:
+    <<: *app
+    build: { context: ., dockerfile: till/Dockerfile }
+    environment:
+      SERVICE_NAME: till
+      DB_HOST: till-db
+      # The Z-report and the re-checks under lock must see every committed sale and return.
+      DB_ISOLATION: READ COMMITTED
+      SEED_PATH: /shared/seed.json
+    networks: [backend, till-net]
+    depends_on:
+      till-db: { condition: service_healthy }
+
+  purchasing:
+    <<: *app
+    build: { context: ., dockerfile: purchasing/Dockerfile }
+    environment:
+      SERVICE_NAME: purchasing
+      DB_HOST: purchasing-db
+      SEED_PATH: /shared/seed.json
+    networks: [backend, purchasing-net]
+    depends_on:
+      purchasing-db: { condition: service_healthy }
+
+  customers:
+    <<: *app
+    build: { context: ., dockerfile: customers/Dockerfile }
+    environment:
+      SERVICE_NAME: customers
+      DB_HOST: customers-db
+      SEED_PATH: /shared/seed.json
+    networks: [backend, customers-net]
+    depends_on:
+      customers-db: { condition: service_healthy }
+
+  reporting:
+    <<: *app
+    build: { context: ., dockerfile: reporting/Dockerfile }
+    environment:
+      SERVICE_NAME: reporting
+      DB_HOST: reporting-db
+      SEED_PATH: /shared/seed.json
+    networks: [backend, reporting-net]
+    depends_on:
+      reporting-db: { condition: service_healthy }
+
+  till-db:
+    <<: *db
+    labels: { pos.role: store, pos.owner: till }
+    networks: [till-net]
+
+  purchasing-db:
+    <<: *db
+    labels: { pos.role: store, pos.owner: purchasing }
+    networks: [purchasing-net]
+
+  customers-db:
+    <<: *db
+    labels: { pos.role: store, pos.owner: customers }
+    networks: [customers-net]
+
+  reporting-db:
+    <<: *db
+    labels: { pos.role: store, pos.owner: reporting }
+    networks: [reporting-net]
+
+volumes:
+  calllogs:
+
+networks:
+  backend:
+  till-net:
+  purchasing-net:
+  customers-net:
+  reporting-net:

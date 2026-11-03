@@ -948,3 +948,31 @@ Decisions the design left open, taken while implementing. Please review.
   `.register_id`, `return_items.RTID`). Table and column names are unchanged.
 - **Reward points:** with a customer, `add_points` is called even when
   `floor(total)` is `0`.
+
+### Variant B
+
+- **Isolation level in till.** till's database sessions run with
+  `READ COMMITTED` (compose variable `DB_ISOLATION`, read in `common/db.py`).
+  Under MariaDB's default `REPEATABLE READ`, the close transaction could
+  compute the Z-report from a snapshot taken before it got the shift lock and
+  miss a sale that committed while it waited; the same holds for the
+  re-checks of a return. `READ COMMITTED` makes every read after a lock see
+  all committed rows.
+- **Outbox retry** sends only undelivered rows older than one round (2 s), so
+  that it does not race the delivery right after the commit and add hops to
+  a request that is still running.
+- **Price list copy:** the first pull from purchasing happens 60 s after
+  start; until then till uses the copy loaded from the seed.
+- **Payments in a sale body** are listed as they were paid, one entry per
+  payment in the order of the request (the monolith lists one cash and one
+  card entry, then the gift cards).
+- **Stock:** a product in the price list without a row in `stock` counts as
+  0 on hand (`409 stock`).
+- **Gift card balance** is checked against the sum of all payments with that
+  card, before and again under the row lock; the debit is one update per
+  card.
+- **Customers:** `zip_code` is accepted as a number or a string and stored
+  as a string; `phone` is stored as given. From the seed, the legacy phone
+  number (a double) is stored as its digits.
+- **Undo in reporting** deletes the entry of the step. Till never calls it;
+  it exists because the undo code is the same for every writer.
