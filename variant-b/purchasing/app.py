@@ -90,8 +90,9 @@ def get_product(product_id: int):
 @APP.get("/internal/price-list")
 def price_list():
     with transaction() as cur:
-        cur.execute("SELECT product_id, retail_price FROM products ORDER BY product_id")
-        return [{"product_id": r["product_id"], "unit_price": float(money(r["retail_price"]))}
+        cur.execute("SELECT product_id, retail_price, category FROM products ORDER BY product_id")
+        return [{"product_id": r["product_id"], "unit_price": float(money(r["retail_price"])),
+                 "category": r["category"]}
                 for r in cur.fetchall()]
 
 

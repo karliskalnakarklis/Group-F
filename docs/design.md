@@ -1221,3 +1221,31 @@ review.
 - **No migration:** new tables and columns are created by the schema at start
   (`CREATE TABLE IF NOT EXISTS`), so they exist only in a fresh database;
   `make up-a` resets all data.
+
+#### Variant B
+
+- **The VAT rates** are a constant in till's code (from CR1), written into
+  `vat_rates` at start. `vat_rate_of` takes the row of the category, else
+  the `*` row.
+- **`sales.tax_rate` is replaced by `sales.tier`** in the same column
+  position. v1 needed the rate for the refund; with gross prices the refund
+  does not need it. The table `tax_rates` and the helper `tax_rate()` stay,
+  unused, so that fewer lines change.
+- **`sold_at`** is taken before the `earn` call (the design fixes the sale's
+  date there), so it is a few milliseconds earlier than the commit.
+- **`tax_total`** in the Z-report and the sales report is still the sum of
+  the sales' `tax`; this equals the sum of the `vat` values, because the
+  `tax` of every sale is the sum of its stored `vat` entries.
+- **`POST /customers`** answers `tier` and `spend_12m` as well (the same body
+  as `GET /customers/{id}`; a new customer is `bronze` with `0`). In
+  customers this is local, so it costs no call.
+- **Return in till:** till's own transaction is opened before the
+  `take_back_points` call (`with Steps() as steps, transaction() as cur:`), so
+  that the v1 transaction block keeps its indentation and fewer lines change.
+  The connection holds no lock during the call; the first lock is the shared
+  lock on the shift, taken after it. `refund_amount` is computed in the
+  checks for the call and again under the lock, from the same lines and
+  prices.
+- **Legacy customers** start with a spend of `0` (the seed has no sales
+  history); their legacy `reward_points` stay.
+- **No migration**, as in variant A; `make up-b` resets all data.

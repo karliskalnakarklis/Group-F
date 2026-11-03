@@ -62,3 +62,65 @@ Commit `b27c80f` "Implement variant B (capability-aligned), version 1":
 - `make blast-b` was not run.
 - The bench result `bench/results/b-v1-bench.json` was produced but not
   committed; there is no `v1` tag yet.
+
+## Version 2 (CR1, CR2)
+
+| Field | Value |
+|-------|-------|
+| Tool | Claude Code, in the Claude desktop app (Code tab), Windows 11, auto mode |
+| Model and version | Claude Opus 5.5 (`claude-opus-5-5`) |
+| Date(s) | 2026-11-03 |
+| Who drove the session | Bozhidar Chobanov |
+| Input given | `docs/design.md` at commit `79d0258` ("Design for v2: variant A, variant B merged into one structure"). The agent also read `AGENTS.md`, `variant-b/README.md`, `docs/change-requests.md`, `docs/contract.md`, `tests/cr/`, the `POS_LEVEL`-dependent parts of `tests/acceptance/`, `tests/pos.py`, all of `variant-b/`, the `Makefile` and `shared/seed.json` (products 1 and 56, customers). An earlier draft of the variant B v2 design (commit `01a9db4`) was written by the agent in the same session, from a design prompt by Bozhidar Chobanov; `79d0258` is the group's merged version of it. |
+| Prompts | One prompt for both variants, see [`variant-a.md`](variant-a.md), "Version 2". |
+| Commits | "Implement version 2 of variant B (CR1, CR2)", made by the agent after variant A (`faa28df`); this log entry is part of that commit. |
+| Manual changes | None so far. |
+
+### What the agent produced
+
+- `variant-b/purchasing/app.py`: `GET /internal/price-list` answers
+  `category`.
+- `variant-b/till/app.py`: `vat_rates`, `category` in the price list copy,
+  `vat_rate` per sale line, `sale_vat`, `tier` on the sale (in place of
+  `tax_rate`); VAT per rate in the sale, the Z-report and the ledger
+  payload; gross refund; the `take_back_points` step on a return of a
+  customer's sale.
+- `variant-b/customers/app.py`: `spend_entries`; tier and points by tier in
+  `earn`; the new call `take-back` and the undo of both steps; `tier` and
+  `spend_12m` on a customer.
+- `variant-b/reporting/app.py`: `sale_entry_vat` and `vat` in the sales
+  report.
+- `docs/design.md`: "Decisions taken by the agent (version 2)" → "Variant B".
+- No change to the gateway, `common/` or `docker-compose.yml`.
+
+### How the agent verified it
+
+- `make up-b`: all containers healthy.
+- `make test-b-v2`: 53 passed (run with `RUN="bash tests/runner.sh"`, for
+  the same path problem as in variant A; no file was changed for this).
+- `make conformance-b`: 26 passed, 0 failed.
+- The bench (`bench/measure.py` with `POS_LEVEL=v2`) ran without "no call
+  log found"; its output was written outside the repository.
+- Manual checks against a fresh stack, with the same requests as in variant A:
+  1. Mixed sale: `vat` 2.6 % (17.52 / 0.46 / 17.98), then 8.1 % (17.57 /
+     1.42 / 18.99); total 36.97, tax 1.88.
+  2. Sale with customer 1 (27.98): bronze, 27 points; points 33 → 60,
+     `spend_12m` 27.98.
+  3. Return of product 56 (18.99): points 60 → 42, `spend_12m` 8.99. A
+     customer whose points were set to 5 in `customers-db` ended at 0 after
+     a return worth 18 points.
+  4. Z-report of register 2 and sales report of store 1: the same `vat` and
+     `tax_total` (3.53).
+  5. `customers` stopped: a sale without a customer answered `201`; a return
+     of a sale of customer 1 answered `503 customers unavailable`, no return
+     was stored and no stock was given back; after a restart the customer's
+     points and spend were unchanged.
+
+### Not verified by the agent
+
+- The undo of `take_back_points` after till's own transaction fails or after
+  a timeout of the call.
+- Silver and gold, and a return of a silver sale, only through `tests/cr/`.
+- Two sales of one customer at the same time (accepted in the design).
+- The 60 s refresh of the category was not observed.
+- `make blast-b` and `make impact` were not run.

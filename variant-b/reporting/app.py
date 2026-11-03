@@ -31,6 +31,11 @@ CREATE TABLE IF NOT EXISTS refund_entries (
   refund_amount decimal(12,2) NOT NULL,
   KEY store_day (store_id, refunded_on)
 );
+CREATE TABLE IF NOT EXISTS sale_entry_vat (
+  sale_id int NOT NULL, rate decimal(6,4) NOT NULL,
+  net decimal(12,2) NOT NULL, vat decimal(12,2) NOT NULL, gross decimal(12,2) NOT NULL,
+  PRIMARY KEY (sale_id, rate)
+);
 """
 
 
@@ -52,6 +57,13 @@ class EntryLine(BaseModel):
     qty: int
 
 
+class EntryVat(BaseModel):
+    rate: float
+    net: float
+    vat: float
+    gross: float
+
+
 class SaleEntryIn(BaseModel):
     sale_id: int
     store: int
@@ -59,6 +71,7 @@ class SaleEntryIn(BaseModel):
     total: float
     tax: float
     lines: list[EntryLine] = Field(default_factory=list)
+    vat: list[EntryVat] = Field(default_factory=list)
 
 
 class RefundEntryIn(BaseModel):
@@ -82,6 +95,9 @@ def record_sale(inp: SaleEntryIn):
             for n, line in enumerate(inp.lines, start=1):
                 cur.execute("INSERT INTO sale_entry_lines (sale_id, line_no, product_id, qty) VALUES (%s,%s,%s,%s)",
                             (inp.sale_id, n, line.product_id, line.qty))
+            for v in inp.vat:
+                cur.execute("INSERT INTO sale_entry_vat (sale_id, rate, net, vat, gross) VALUES (%s,%s,%s,%s,%s)",
+                            (inp.sale_id, str(v.rate), money(v.net), money(v.vat), money(v.gross)))
     return {"sale_id": inp.sale_id}
 
 
@@ -114,7 +130,14 @@ def sales_report(store: int, to: date, from_: date = Query(alias="from")):
                     " WHERE e.store_id=%s AND e.sold_on BETWEEN %s AND %s"
                     " GROUP BY l.product_id ORDER BY qty DESC, l.product_id LIMIT 5", (store, from_, to))
         top = [{"product_id": r["product_id"], "qty": int(r["qty"])} for r in cur.fetchall()]
+        cur.execute("SELECT v.rate, SUM(v.net) AS net, SUM(v.vat) AS vat, SUM(v.gross) AS gross FROM sale_entry_vat v"
+                    " JOIN sale_entries e ON e.sale_id = v.sale_id"
+                    " WHERE e.store_id=%s AND e.sold_on BETWEEN %s AND %s GROUP BY v.rate ORDER BY v.rate",
+                    (store, from_, to))
+        vat = [{"rate": float(r["rate"]), "net": float(money(r["net"])), "vat": float(money(r["vat"])),
+                "gross": float(money(r["gross"]))} for r in cur.fetchall()]
     gross, refunds = money(sales["gross"]), money(refunds)
     return {"store": store, "from": from_.isoformat(), "to": to.isoformat(), "sales_count": sales["n"],
             "gross_total": float(gross), "tax_total": float(money(sales["tax"])),
-            "refunds_total": float(refunds), "net_revenue": float(gross - refunds), "top_products": top}
+            "refunds_total": float(refunds), "net_revenue": float(gross - refunds), "top_products": top,
+            "vat": vat}

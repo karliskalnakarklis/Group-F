@@ -20,6 +20,10 @@ from common.db import (APPLIED_STEPS, fail, finish_step, init_database, install_
 APP = create_app("till")
 PRICE_LIST_EVERY = 60.0   # seconds
 OUTBOX_EVERY = 2.0        # seconds
+# CR1: VAT rates by product category, from the change request (not in the seed).
+# '*' is the standard rate for every other category.
+REDUCED = ("Dairy", "Produce", "Beef", "Poultry", "Pasta", "DryGoods", "PetFood")
+VAT_RATES = {**{category: "0.026" for category in REDUCED}, "*": "0.081"}
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS registers (
@@ -36,7 +40,10 @@ CREATE TABLE IF NOT EXISTS shifts (
   KEY register (register)
 );
 CREATE TABLE IF NOT EXISTS price_list (
-  product_id int NOT NULL PRIMARY KEY, unit_price decimal(12,2) NOT NULL
+  product_id int NOT NULL PRIMARY KEY, unit_price decimal(12,2) NOT NULL, category varchar(50) NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS vat_rates (
+  category varchar(50) NOT NULL PRIMARY KEY, rate decimal(6,4) NOT NULL
 );
 CREATE TABLE IF NOT EXISTS stock (
   product_id int NOT NULL PRIMARY KEY, on_hand int NOT NULL
@@ -51,14 +58,19 @@ CREATE TABLE IF NOT EXISTS sales (
   sale_id int NOT NULL AUTO_INCREMENT PRIMARY KEY,
   shift_id int NOT NULL, register int NOT NULL, sold_on date NOT NULL, sold_at datetime NOT NULL,
   staff_id int NOT NULL, customer_id int DEFAULT NULL,
-  subtotal decimal(12,2) NOT NULL, tax decimal(12,2) NOT NULL, tax_rate decimal(6,4) NOT NULL,
+  subtotal decimal(12,2) NOT NULL, tax decimal(12,2) NOT NULL, tier varchar(10) DEFAULT NULL,
   total decimal(12,2) NOT NULL, points_earned int NOT NULL DEFAULT 0,
   KEY shift (shift_id)
 );
 CREATE TABLE IF NOT EXISTS sale_lines (
   sale_id int NOT NULL, line_no int NOT NULL, product_id int NOT NULL, qty int NOT NULL,
-  unit_price decimal(12,2) NOT NULL,
+  unit_price decimal(12,2) NOT NULL, vat_rate decimal(6,4) NOT NULL,
   PRIMARY KEY (sale_id, line_no)
+);
+CREATE TABLE IF NOT EXISTS sale_vat (
+  sale_id int NOT NULL, rate decimal(6,4) NOT NULL,
+  net decimal(12,2) NOT NULL, vat decimal(12,2) NOT NULL, gross decimal(12,2) NOT NULL,
+  PRIMARY KEY (sale_id, rate)
 );
 CREATE TABLE IF NOT EXISTS payments (
   sale_id int NOT NULL, line_no int NOT NULL, tender varchar(10) NOT NULL, gift_card_id int DEFAULT NULL,
@@ -94,14 +106,16 @@ def fill(cur, seed: dict) -> None:
     for e in seed["employee_info"]:
         cur.execute("INSERT INTO staff (staff_id) VALUES (%s)", (e["employee_id"],))
     for p in seed["product_inventory"]:
-        cur.execute("INSERT INTO price_list (product_id, unit_price) VALUES (%s,%s)",
-                    (p["product_id"], money(p["unit_price"])))
+        cur.execute("INSERT INTO price_list (product_id, unit_price, category) VALUES (%s,%s,%s)",
+                    (p["product_id"], money(p["unit_price"]), p["productType"]))
         cur.execute("INSERT INTO stock (product_id, on_hand) VALUES (%s,%s)", (p["product_id"], p["in_stock"]))
     for t in seed["tax_table"]:
         cur.execute("INSERT INTO tax_rates (tax_year, rate) VALUES (%s,%s)", (t["tax_year"], str(t["tax_rate"])))
     for g in seed["gift_card"]:
         cur.execute("INSERT INTO gift_cards (gift_card_id, balance) VALUES (%s,%s)",
                     (g["gift_id"], money(g["card_balance"])))
+    for category, rate in VAT_RATES.items():
+        cur.execute("INSERT INTO vat_rates (category, rate) VALUES (%s,%s)", (category, rate))
 
 
 @APP.on_event("startup")
@@ -158,6 +172,32 @@ def hold_shift_open(cur, shift_id: int, register: int) -> None:
 
 def tax_rate(cur) -> Decimal:
     return Decimal(str(one(cur, "SELECT rate FROM tax_rates ORDER BY tax_year DESC LIMIT 1")["rate"]))
+
+
+def vat_rate_of(cur, category: str) -> Decimal:
+    """CR1: the rate of the category, else the standard rate ('*')."""
+    row = one(cur, "SELECT rate FROM vat_rates WHERE category IN (%s, '*') ORDER BY category = '*' LIMIT 1", category)
+    return Decimal(str(row["rate"])).normalize()
+
+
+def vat_per_rate(lines: list, prices: dict[int, Decimal], rates: dict[int, Decimal]) -> list[dict]:
+    """CR1, per rate: gross = sum of the line totals, vat = gross x rate / (1 + rate)
+    rounded half up, net = gross - vat. Lowest rate first."""
+    gross: dict[Decimal, Decimal] = {}
+    for line in lines:
+        rate = rates[line.product_id]
+        gross[rate] = gross.get(rate, Decimal(0)) + line.qty * prices[line.product_id]
+    entries = []
+    for rate in sorted(gross):
+        g = money(gross[rate])
+        v = money(g * rate / (1 + rate))
+        entries.append({"rate": rate, "net": g - v, "vat": v, "gross": g})
+    return entries
+
+
+def vat_body(rows) -> list[dict]:
+    return [{"rate": float(r["rate"]), "net": float(money(r["net"])), "vat": float(money(r["vat"])),
+             "gross": float(money(r["gross"]))} for r in rows]
 
 
 def store_of(cur, register: int) -> int:
@@ -226,6 +266,9 @@ def close_register(register: int, inp: CloseIn):
         cash = one(cur, "SELECT COALESCE(SUM(p.amount),0) AS cash FROM payments p JOIN sales s ON s.sale_id=p.sale_id"
                         " WHERE s.shift_id=%s AND p.tender='cash'", sid)["cash"]
         refunds = one(cur, "SELECT COALESCE(SUM(refund_amount),0) AS r FROM returns WHERE shift_id=%s", sid)["r"]
+        cur.execute("SELECT v.rate, SUM(v.net) AS net, SUM(v.vat) AS vat, SUM(v.gross) AS gross FROM sale_vat v"
+                    " JOIN sales s ON s.sale_id=v.sale_id WHERE s.shift_id=%s GROUP BY v.rate ORDER BY v.rate", (sid,))
+        vat = vat_body(cur.fetchall())
         cur.execute("UPDATE shifts SET closed_at=%s, closed_by=%s, counted_cash=%s WHERE shift_id=%s",
                     (now().replace(tzinfo=None), inp.employee_id, counted, sid))
     opening, cash, refunds = money(shift["opening_cash"]), money(cash), money(refunds)
@@ -234,7 +277,7 @@ def close_register(register: int, inp: CloseIn):
             "gross_total": float(money(sales["gross"])), "tax_total": float(money(sales["tax"])),
             "refunds_total": float(refunds), "cash_sales": float(cash),
             "opening_cash": float(opening), "cash_expected": float(expected),
-            "counted_cash": float(counted), "difference": float(counted - expected)}
+            "counted_cash": float(counted), "difference": float(counted - expected), "vat": vat}
 
 
 # --- sales -------------------------------------------------------------------------------
@@ -265,10 +308,12 @@ def sale_body(cur, sale_id: int) -> dict:
         if p["tender"] == "gift_card":
             payment["gift_card_id"] = p["gift_card_id"]
         payments.append(payment)
+    cur.execute("SELECT rate, net, vat, gross FROM sale_vat WHERE sale_id=%s ORDER BY rate", (sale_id,))
+    vat = vat_body(cur.fetchall())
     return {"sale_id": sale_id, "register": s["register"], "date": s["sold_on"].isoformat(),
             "customer_id": s["customer_id"], "lines": lines, "subtotal": float(money(s["subtotal"])),
             "tax": float(money(s["tax"])), "total": float(money(s["total"])),
-            "reward_points_earned": s["points_earned"], "payments": payments}
+            "reward_points_earned": s["points_earned"], "payments": payments, "vat": vat, "tier": s["tier"]}
 
 
 def check_stock(cur, wanted: dict[int, int], lock: bool) -> None:
@@ -304,15 +349,15 @@ def checkout(inp: SaleIn):
     with transaction() as cur:
         shift = require_open_shift(cur, inp.register)
         require_staff(cur, inp.employee_id)
-        prices = {}
+        prices, rates = {}, {}
         for product_id in wanted:
-            prices[product_id] = money(require(cur, "product", "SELECT unit_price FROM price_list WHERE product_id=%s",
-                                               product_id)["unit_price"])
+            row = require(cur, "product", "SELECT unit_price, category FROM price_list WHERE product_id=%s", product_id)
+            prices[product_id], rates[product_id] = money(row["unit_price"]), vat_rate_of(cur, row["category"])
         check_stock(cur, wanted, lock=False)
-        rate = tax_rate(cur)
-        subtotal = money(sum((line.qty * prices[line.product_id] for line in inp.lines), Decimal(0)))
-        tax = money(subtotal * rate)
-        total = subtotal + tax
+        vat = vat_per_rate(inp.lines, prices, rates)
+        total = sum((e["gross"] for e in vat), Decimal(0))
+        tax = sum((e["vat"] for e in vat), Decimal(0))
+        subtotal = total - tax
         paid = sum((money(p.amount) for p in inp.payments), Decimal(0))
         if paid != total:
             raise fail(422, f"payments add up to {paid}, but the total is {total}")
@@ -320,25 +365,30 @@ def checkout(inp: SaleIn):
         check_gift_cards(cur, gift_sums, lock=False)
         store = store_of(cur, inp.register)
 
+    at = now()  # before the earn call, so that the spend entry has the sale's date
     with Steps() as steps:
-        points = 0
+        points, tier = 0, None
         if inp.customer_id is not None:
-            points = steps.run("customers", "earn_points", f"/internal/customers/{inp.customer_id}/earn",
-                               {"total": float(total)})["points_earned"]
+            earned = steps.run("customers", "earn_points", f"/internal/customers/{inp.customer_id}/earn",
+                               {"total": float(total), "sale_date": at.date().isoformat()})
+            points, tier = earned["points_earned"], earned["tier"]
         with transaction() as cur:
             # locks in a fixed order: shift, products by ID, gift cards by ID
             hold_shift_open(cur, shift["shift_id"], inp.register)
             check_stock(cur, wanted, lock=True)
             check_gift_cards(cur, gift_sums, lock=True)
-            at = now()
             cur.execute("INSERT INTO sales (shift_id, register, sold_on, sold_at, staff_id, customer_id, subtotal,"
-                        " tax, tax_rate, total, points_earned) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                        " tax, tier, total, points_earned) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                         (shift["shift_id"], inp.register, at.date(), at.replace(tzinfo=None), inp.employee_id,
-                         inp.customer_id, subtotal, tax, rate, total, points))
+                         inp.customer_id, subtotal, tax, tier, total, points))
             sale_id = cur.lastrowid
             for n, line in enumerate(inp.lines, start=1):
-                cur.execute("INSERT INTO sale_lines (sale_id, line_no, product_id, qty, unit_price)"
-                            " VALUES (%s,%s,%s,%s,%s)", (sale_id, n, line.product_id, line.qty, prices[line.product_id]))
+                cur.execute("INSERT INTO sale_lines (sale_id, line_no, product_id, qty, unit_price, vat_rate)"
+                            " VALUES (%s,%s,%s,%s,%s,%s)", (sale_id, n, line.product_id, line.qty,
+                                                            prices[line.product_id], rates[line.product_id]))
+            for e in vat:
+                cur.execute("INSERT INTO sale_vat (sale_id, rate, net, vat, gross) VALUES (%s,%s,%s,%s,%s)",
+                            (sale_id, e["rate"], e["net"], e["vat"], e["gross"]))
             for product_id in sorted(wanted):
                 cur.execute("UPDATE stock SET on_hand = on_hand - %s WHERE product_id=%s", (wanted[product_id], product_id))
             for n, p in enumerate(inp.payments, start=1):
@@ -349,7 +399,8 @@ def checkout(inp: SaleIn):
                             (gift_sums[gift_card_id], gift_card_id))
             entry_id = add_to_outbox(cur, "sale", {
                 "sale_id": sale_id, "store": store, "date": at.date().isoformat(), "total": float(total),
-                "tax": float(tax), "lines": [{"product_id": l.product_id, "qty": l.qty} for l in inp.lines]})
+                "tax": float(tax), "lines": [{"product_id": l.product_id, "qty": l.qty} for l in inp.lines],
+                "vat": [{k: float(e[k]) for k in ("rate", "net", "vat", "gross")} for e in vat]})
             body = sale_body(cur, sale_id)
     deliver(entry_id)
     return body
@@ -372,7 +423,7 @@ class ReturnIn(BaseModel):
 
 def check_return(cur, sale_id: int, wanted: dict[int, int]) -> Decimal:
     """Every line is a product of the sale, and not more than sold minus
-    already returned (409 return). Answers the net amount of the lines."""
+    already returned (409 return). Answers the gross amount of the lines (CR1)."""
     cur.execute("SELECT product_id, SUM(qty) AS qty, MAX(unit_price) AS unit_price FROM sale_lines"
                 " WHERE sale_id=%s GROUP BY product_id", (sale_id,))
     sold = {r["product_id"]: r for r in cur.fetchall()}
@@ -393,16 +444,20 @@ def check_return(cur, sale_id: int, wanted: dict[int, int]) -> Decimal:
 def create_return(inp: ReturnIn):
     wanted = added_up(inp.lines)
     with transaction() as cur:
-        require(cur, "sale", "SELECT sale_id FROM sales WHERE sale_id=%s", inp.sale_id)
+        sale = require(cur, "sale", "SELECT * FROM sales WHERE sale_id=%s", inp.sale_id)
         shift = require_open_shift(cur, inp.register)
         require_staff(cur, inp.employee_id)
-        check_return(cur, inp.sale_id, wanted)
+        refund = money(check_return(cur, inp.sale_id, wanted))
         store = store_of(cur, inp.register)
-    with transaction() as cur:
+    # CR2: take the points back first (only for a sale with a customer); undone if till's transaction fails
+    with Steps() as steps, transaction() as cur:
+        if sale["customer_id"] is not None:
+            steps.run("customers", "take_back_points", f"/internal/customers/{sale['customer_id']}/take-back",
+                      {"refund_amount": float(refund), "tier": sale["tier"], "sale_date": sale["sold_on"].isoformat()})
         hold_shift_open(cur, shift["shift_id"], inp.register)
         sale = one(cur, "SELECT * FROM sales WHERE sale_id=%s FOR UPDATE", inp.sale_id)
         net = check_return(cur, inp.sale_id, wanted)  # checked again, sale locked
-        refund = money(net) + money(net * Decimal(str(sale["tax_rate"])))
+        refund = money(net)
         at = now()
         cur.execute("INSERT INTO returns (sale_id, shift_id, register, returned_on, returned_at, staff_id, refund_amount)"
                     " VALUES (%s,%s,%s,%s,%s,%s,%s)", (inp.sale_id, shift["shift_id"], inp.register, at.date(),
@@ -524,9 +579,9 @@ def refresh_price_list() -> None:
     prices = call_ok("purchasing", "GET", "/internal/price-list")
     with transaction() as cur:
         for p in prices:
-            cur.execute("INSERT INTO price_list (product_id, unit_price) VALUES (%s,%s)"
-                        " ON DUPLICATE KEY UPDATE unit_price=VALUES(unit_price)",
-                        (p["product_id"], money(p["unit_price"])))
+            cur.execute("INSERT INTO price_list (product_id, unit_price, category) VALUES (%s,%s,%s)"
+                        " ON DUPLICATE KEY UPDATE unit_price=VALUES(unit_price), category=VALUES(category)",
+                        (p["product_id"], money(p["unit_price"]), p["category"]))
 
 
 def refresh_price_list_forever() -> None:
