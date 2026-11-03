@@ -1,0 +1,123 @@
+{
+  "variant": "b",
+  "level": "v1",
+  "measured_at": "2026-11-03T19:09:47+00:00",
+  "settings": {
+    "n": 30,
+    "warmup": 3
+  },
+  "use_cases": {
+    "product_lookup": {
+      "latency_ms": {
+        "mean": 7.94,
+        "p50": 7.95,
+        "p95": 8.96,
+        "max": 10.32
+      },
+      "hops": {
+        "median": 2.0,
+        "max": 2
+      },
+      "services_involved": {
+        "median": 3.0,
+        "max": 3
+      }
+    },
+    "checkout": {
+      "latency_ms": {
+        "mean": 16.99,
+        "p50": 16.78,
+        "p95": 19.78,
+        "max": 22.9
+      },
+      "hops": {
+        "median": 3.0,
+        "max": 3
+      },
+      "services_involved": {
+        "median": 4.0,
+        "max": 4
+      }
+    },
+    "return": {
+      "latency_ms": {
+        "mean": 30.92,
+        "p50": 29.28,
+        "p95": 41.36,
+        "max": 44.4
+      },
+      "hops": {
+        "median": 2.0,
+        "max": 2
+      },
+      "services_involved": {
+        "median": 3.0,
+        "max": 3
+      }
+    },
+    "purchase_order": {
+      "latency_ms": {
+        "mean": 6.11,
+        "p50": 6.05,
+        "p95": 8.11,
+        "max": 8.17
+      },
+      "hops": {
+        "median": 1.0,
+        "max": 1
+      },
+      "services_involved": {
+        "median": 2.0,
+        "max": 2
+      }
+    },
+    "goods_receipt": {
+      "latency_ms": {
+        "mean": 17.0,
+        "p50": 16.35,
+        "p95": 21.33,
+        "max": 28.45
+      },
+      "hops": {
+        "median": 2.0,
+        "max": 2
+      },
+      "services_involved": {
+        "median": 3.0,
+        "max": 3
+      }
+    },
+    "z_report": {
+      "latency_ms": {
+        "mean": 24.31,
+        "p50": 23.88,
+        "p95": 28.19,
+        "max": 31.52
+      },
+      "hops": {
+        "median": 1.0,
+        "max": 1
+      },
+      "services_involved": {
+        "median": 2.0,
+        "max": 2
+      }
+    },
+    "sales_report": {
+      "latency_ms": {
+        "mean": 5.35,
+        "p50": 5.35,
+        "p95": 6.12,
+        "max": 6.55
+      },
+      "hops": {
+        "median": 1.0,
+        "max": 1
+      },
+      "services_involved": {
+        "median": 2.0,
+        "max": 2
+      }
+    }
+  }
+}
