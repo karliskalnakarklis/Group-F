@@ -203,7 +203,46 @@ before `v1`. Reason: *to do*.
 
 ## 7. What the DDD analysis showed
 
-> Two or three findings from `domain.md` that matter for the decision.
+The full analysis is in [`domain.md`](domain.md). Three findings matter for
+the decision.
+
+**1. A cuts three rules in half; B keeps them inside till.** In A, the open
+shift, the Z-report and the loyalty rule each need two services: stores and
+sales for the first two, sales and people for loyalty. Each of them costs a
+call between services and either an undo or an accepted race. In B, the
+shift, the Z-report, stock and gift cards are checked in one transaction in
+till; the only rule B splits is the goods receipt (purchasing and till),
+which is back office ([`domain.md`](domain.md), "Aggregates and
+invariants"). This explains the measurements: six calls per checkout in A
+against two in B (C3), and 8 containers that stop checkout in A against 4 in
+B (C1). It also matters for C5, because the Z-report is one of the rules A
+splits.
+
+**2. A is one legacy model cut by foreign keys, not a set of bounded
+contexts.** A keeps the legacy names in every service, has no translation
+layer, and its context map has two cycles: stores ↔ sales, and since CR2
+people ↔ sales. B's map is almost a tree with till in the middle
+([`domain.md`](domain.md), "Context map"). CR2 showed this in practice: in A
+the loyalty rule had to go into sales, because the spend is computed from
+sales' tables, while the points stay in people. In B the rule changed only in
+customers; till got one new call and stores the tier it is given. `make
+impact` counts both as two services (section 3), so the metric does not show
+the new cycle in A.
+
+**3. Personal data: the subdomains explain the C4 result.** Staff records are
+a generic subdomain that the PoS needs only as an ID. A puts them together
+with the loyalty customers in people, so every till use case depends on
+people, and the employees' SSNs and passwords stay in the PoS. B keeps
+employees as `staff_id` only. Both variants keep personal data in one store
+(C4), but B keeps less of it.
+
+**What the analysis changed.** We did not refine variant B in the code:
+`v1` and `v2` were already built and measured, and a new cut would have made
+the measurements compare something else than what we designed. The weakest
+spot the analysis found in B is the two-way dependency between purchasing
+and till on goods receipt, which works against the Head of Development's wish
+that teams deploy without waiting for each other. The refinement we would
+make is described in [`domain.md`](domain.md), "What the analysis changed".
 
 ## 8. Limits of this comparison
 
