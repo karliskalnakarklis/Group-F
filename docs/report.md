@@ -23,10 +23,10 @@ conformance checks (A: 43, B: 26 passed).
 | ID | Criterion | Baseline | A `v1` | B `v1` | A `v2` | B `v2` | Evidence |
 |----|-----------|----------|--------|--------|--------|--------|----------|
 | C1 | Checkout survives outages: containers whose stop makes checkout fail (lower is better) | 1 of 1 | 8 of 8 | 4 of 8 | 8 of 8 | 4 of 8 | [`a-v1-blast.json`](../bench/results/a-v1-blast.json), [`b-v1-blast.json`](../bench/results/b-v1-blast.json), [`a-v2-blast.json`](../bench/results/a-v2-blast.json), [`b-v2-blast.json`](../bench/results/b-v2-blast.json), [`baseline-v1-blast.json`](../bench/results/baseline-v1-blast.json) |
-| C2 | Spread of the change requests: service folders changed `v1` → `v2` (lines added + deleted) | – | – | – | 4 (200) | 4 (311) | [`change-impact.md`](../bench/results/change-impact.md) |
+| C2 | Spread of the change requests: service folders changed `v1` → `v2` (lines added + deleted) | *n/a: the monolith did not get the change requests* | *n/a: measured from `v1` to `v2`* | *n/a: measured from `v1` to `v2`* | 4 (200) | 4 (311) | [`change-impact.md`](../bench/results/change-impact.md) |
 | C3 | Checkout latency: p95 in ms (hops) | 6.6 (0) | 36.7 (7) | 19.8 (3) | 31.9 (7) | 24.6 (3) | [`a-v1-bench.json`](../bench/results/a-v1-bench.json), [`b-v1-bench.json`](../bench/results/b-v1-bench.json), [`a-v2-bench.json`](../bench/results/a-v2-bench.json), [`b-v2-bench.json`](../bench/results/b-v2-bench.json), [`baseline-v1-bench.json`](../bench/results/baseline-v1-bench.json) |
 | C4 | Spread of personal data: data stores with personal data (lower is better) | 1 of 1 | 1 of 4 | 1 of 4 | 1 of 4 | 1 of 4 | [`a-v1-personal.json`](../bench/results/a-v1-personal.json), [`b-v1-personal.json`](../bench/results/b-v1-personal.json), [`a-v2-personal.json`](../bench/results/a-v2-personal.json), [`b-v2-personal.json`](../bench/results/b-v2-personal.json), [`baseline-v1-personal.json`](../bench/results/baseline-v1-personal.json) |
-| C5 | Reports reconcile: level 1 to 3 (higher is better) | | | | | | *to do: agreed level; ratings below in "C5 in detail"* |
+| C5 | Reports reconcile: level 1 to 3 (higher is better) | *not rated: C5 rates the two variants* | 2 | 2 | 2 | 2 | Rating by both members, see "C5 in detail" below; [`design.md`](design.md), [`stores/app.py`](../variant-a/stores/app.py), [`till/app.py`](../variant-b/till/app.py) |
 
 **C1 in detail.** In A, checkout fails when any one of the eight containers
 is stopped, because sales calls stores, people and inventory on every
@@ -197,7 +197,7 @@ no extra complexity, and these numbers show the full spread of each change.
 | C2 | B, because VAT belongs to selling and loyalty to one capability | Tie at 4 folders; A has fewer lines (200 against 311) | No |
 | C3 | B, because fewer synchronous calls per checkout | B lower at both versions (19.8 / 24.6 ms against 36.7 / 31.9 ms; 3 hops against 7) | Yes |
 | C4 | A, because people owns all personal data | Tie: 1 store in each variant, at `v1` and `v2` | No |
-| C5 | A, because sales owns all sales and returns and computes both reports | *to do* | |
+| C5 | A, because sales owns all sales and returns and computes both reports | Tie: level 2 in both variants, at `v1` and `v2` | No |
 
 **C1.** As expected. In A, checkout calls three other services and needs all
 four databases. The part we did not expect: in B, `customers` is also on the
@@ -223,9 +223,14 @@ employee data at all, while A keeps the full legacy employee records. The
 metric counts stores, not what they hold, so it does not show this
 difference.
 
-**C5.** Not agreed yet. Karlis rates both variants at level 2, at `v1`
-and `v2` (section 2), which would make it a tie: A's risk is a race at the
-close, B's is a delay while reporting is down, and both can be found from the
+**C5.** Both variants are at level 2, at `v1` and `v2` (section 2). The
+part about A was right: sales computes both reports from its own tables, so
+they cannot drift apart in normal operation. But A splits the close of a
+register between stores and sales, so a sale in progress at the close can be
+missing from the Z-report. We expected B's reports to drift apart because
+reporting works on copies; but till delivers each copy before it answers, so
+the copies lag only while reporting is down, and B's close has no race. Each
+variant has one documented way to disagree, and both can be found from the
 stored data.
 
 **Changes after `criteria-v1`.** One change, recorded in
@@ -235,14 +240,50 @@ before `v1`. Reason: *to do*.
 
 ## 5. Decision and trade-offs
 
-> What do you gain and what do you give up with your recommendation? Go
-> through the stakeholders: whose concern is met, whose is not, and what you
-> would tell them.
+**We recommend variant B (capability-aligned).** Adding up the weights from
+[`criteria.md`](criteria.md), where the winner of a criterion gets its full
+weight and a tie splits it, B scores 57.5 and A 42.5:
+
+| ID | Weight | Winner | A | B |
+|----|--------|--------|---|---|
+| C1 Checkout survives outages | 30% | B | 0 | 30 |
+| C2 Spread of the change requests | 25% | A (on lines only) | 25 | 0 |
+| C3 Checkout latency | 10% | B | 0 | 10 |
+| C4 Spread of personal data | 15% | tie | 7.5 | 7.5 |
+| C5 Reports reconcile | 20% | tie | 10 | 10 |
+| **Total** | 100% | | **42.5** | **57.5** |
+
+**Stakeholders: whose concern is met, and what we would tell them.**
+
+| Stakeholder | Concern | Met with B? | What we would tell them |
+|-------------|---------|-------------|-------------------------|
+| Store manager | Checkout keeps working when other parts are down | **Yes** | Checkout needs only till and customers (4 of 8 containers, against 8 of 8 in A). Back office and reporting can be down, and the tills keep selling. If customers is down, a sale without the loyalty card still works. |
+| Store manager | A fast till | **Yes** | 3 hops per checkout against 7 in A (p95 24.6 ms against 31.9 ms at `v2`). |
+| Head of Finance | Reports reconcile to the cent | **Partly**, same as A | Both variants are at level 2. In B the Z-report cannot miss a sale, but the sales report lags while reporting is down; every missing entry is visible in till's outbox and is sent within seconds once reporting is back. |
+| Data Protection Officer | Personal data in as few places as possible | **Yes**, same count as A | One store holds personal data, as in A, and B holds less: no employee records, no SSNs, no passwords. |
+| Product Owner | VAT and loyalty are easy to add | **Partly** | Both changes touched 4 services in both variants, but B needed about 50% more lines (311 against 200), because its copies (ledger, spend record, price list) had to be extended too. Expect each change that touches sales data to cost more code in B. |
+| Head of Development | Teams deploy without waiting for each other; not too many services | **Mostly** | 4 services and 4 databases, the same as A. Till is the centre: customers and purchasing are upstream of it, reporting downstream. The one two-way dependency, purchasing ↔ till on goods receipt, still needs both teams to agree ([`domain.md`](domain.md)). |
+
+**What we gain:** the tills keep selling through most outages, checkout is
+faster, the rules the store manager and the Head of Finance care about are
+checked in one service (till), and B keeps less personal data.
+
+**What we give up:** copies. B keeps a price list, a ledger and a spend
+record that are filled from other services. This made the change requests
+cost more code, the price can be up to 60 s old at the till, and the sales
+report lags during a reporting outage.
 
 ## 6. What would change the decision
 
-> Concrete conditions (a number, a requirement, an organisational change)
-> under which you would recommend the other variant.
+We would recommend variant A under any of these conditions:
+
+| Condition | Why it would favour A |
+|-----------|-----------------------|
+| **Outages weigh less than change.** For example, the tills get an offline mode, so C1 drops to 20% and C2 rises to 35%. | B's lead comes from C1. With these weights A scores 52.5 and B 47.5. |
+| **Many more changes like CR2 are planned** that touch the sales history and the reports. | Every such change must also extend B's copies; in our change requests that cost B about 50% more lines (311 against 200). |
+| **A price change must apply at every till at once.** | B's till sells with a copy of the price list that can be up to 60 s old. A reads the price from inventory on every sale. |
+| **The sales report must be correct even during an outage**, with no lag at all. | B's sales report lags while reporting is down. A's reports come from sales, the same service as the sales themselves. A would still need to close its race at the close of a register to reach level 3. |
+| **All services run on one host** that fails as a whole. | When all containers stop together, B's advantage in C1 disappears, and A's single source for every fact is simpler. |
 
 ## 7. What the DDD analysis showed
 
