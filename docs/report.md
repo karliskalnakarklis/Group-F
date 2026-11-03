@@ -1,9 +1,5 @@
 # Report
 
-> About five pages. Every claim about a variant is backed by a measurement, a
-> test result, a log excerpt or a reference to code. Delete the quoted
-> guidance when you are done.
-
 Group: F
 Members: Karlis Kalnakarklis, Bozhidar Chobanov
 

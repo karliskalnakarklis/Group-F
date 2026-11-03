@@ -1,12 +1,8 @@
 # Findings: what the AI got wrong
 
-> One row per finding. "How found" is one of: acceptance test, conformance
-> check, code review, measurement, other (say what). Link the commit that
-> fixed it.
->
-> Numbering: A… for variant A, B… for variant B, counted on across both
-> versions, so that every number names one finding (`docs/design.md` refers to
-> B1).
+Numbering: A… for variant A, B… for variant B, counted on across both
+versions, so that every number names one finding (`docs/design.md` refers to
+B1).
 
 ## Version 1
 
