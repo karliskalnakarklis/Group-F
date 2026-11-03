@@ -8,6 +8,7 @@
 #   make conformance-<stack>   data-ownership rules, checked in the compose file
 #   make bench-<stack>         latency and hops per use case     -> bench/results/
 #   make blast-<stack>         stop each service, see what still works -> bench/results/
+#   make privacy-<stack>       data stores with personal data (C4)  -> bench/results/
 #   make impact                how far the change requests spread (git tags v1..v2)
 #   make logs / make down
 
@@ -47,6 +48,10 @@ bench-%:
 blast-%:
 	$(call wait,$*)
 	POS_LEVEL=$(LEVEL) ./bench/blast_radius.sh $* > bench/results/$*-$(LEVEL)-blast.json
+
+privacy-%:
+	$(call wait,$*)
+	LEVEL=$(LEVEL) ./bench/personal_data.sh $* > bench/results/$*-$(LEVEL)-personal-data.json
 
 impact:
 	./bench/change_impact.sh v1 v2 | tee bench/results/change-impact.md

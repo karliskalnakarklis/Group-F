@@ -1,0 +1,97 @@
+# Variant B: capability-aligned (docs/design.md). Start it with 'make up-b'.
+# Four capabilities plus the gateway; each store shares a network only with its owner.
+name: pos
+
+x-app: &app
+  volumes:
+    - ../shared:/shared:ro
+    - calllogs:/logs
+  healthcheck:
+    test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+    interval: 2s
+    retries: 30
+
+x-db: &db
+  image: mariadb:11.4
+  healthcheck:
+    test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+    interval: 2s
+    retries: 60
+
+services:
+  gateway:
+    <<: *app
+    build: {context: ., dockerfile: gateway/Dockerfile}
+    ports: ["8000:8000"]
+    networks: [backend]
+    depends_on:
+      till: {condition: service_healthy}
+      purchasing: {condition: service_healthy}
+      customers: {condition: service_healthy}
+      reporting: {condition: service_healthy}
+
+  till:
+    <<: *app
+    build: {context: ., dockerfile: till/Dockerfile}
+    environment: {DB_HOST: till-db, DB_NAME: till, SEED_PATH: /shared/seed.json}
+    networks: [backend, till-net]
+    depends_on:
+      till-db: {condition: service_healthy}
+
+  till-db:
+    <<: *db
+    environment: {MARIADB_DATABASE: till, MARIADB_USER: pos, MARIADB_PASSWORD: pos, MARIADB_ROOT_PASSWORD: root}
+    labels: {pos.role: store, pos.owner: till}
+    networks: [till-net]
+
+  purchasing:
+    <<: *app
+    build: {context: ., dockerfile: purchasing/Dockerfile}
+    environment: {DB_HOST: purchasing-db, DB_NAME: purchasing, SEED_PATH: /shared/seed.json}
+    networks: [backend, purchasing-net]
+    depends_on:
+      purchasing-db: {condition: service_healthy}
+
+  purchasing-db:
+    <<: *db
+    environment: {MARIADB_DATABASE: purchasing, MARIADB_USER: pos, MARIADB_PASSWORD: pos, MARIADB_ROOT_PASSWORD: root}
+    labels: {pos.role: store, pos.owner: purchasing}
+    networks: [purchasing-net]
+
+  customers:
+    <<: *app
+    build: {context: ., dockerfile: customers/Dockerfile}
+    environment: {DB_HOST: customers-db, DB_NAME: customers, SEED_PATH: /shared/seed.json}
+    networks: [backend, customers-net]
+    depends_on:
+      customers-db: {condition: service_healthy}
+
+  customers-db:
+    <<: *db
+    environment: {MARIADB_DATABASE: customers, MARIADB_USER: pos, MARIADB_PASSWORD: pos, MARIADB_ROOT_PASSWORD: root}
+    labels: {pos.role: store, pos.owner: customers}
+    networks: [customers-net]
+
+  reporting:
+    <<: *app
+    build: {context: ., dockerfile: reporting/Dockerfile}
+    environment: {DB_HOST: reporting-db, DB_NAME: reporting, SEED_PATH: /shared/seed.json}
+    networks: [backend, reporting-net]
+    depends_on:
+      reporting-db: {condition: service_healthy}
+
+  reporting-db:
+    <<: *db
+    environment: {MARIADB_DATABASE: reporting, MARIADB_USER: pos, MARIADB_PASSWORD: pos, MARIADB_ROOT_PASSWORD: root}
+    labels: {pos.role: store, pos.owner: reporting}
+    networks: [reporting-net]
+
+volumes:
+  calllogs:
+
+networks:
+  backend:
+  till-net:
+  purchasing-net:
+  customers-net:
+  reporting-net:

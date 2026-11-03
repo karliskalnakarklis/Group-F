@@ -1,0 +1,4 @@
+[
+{"stopped": "none", "results": {"product_lookup": 200, "checkout": 201, "return": 201, "purchase_order": 201, "goods_receipt": 200, "z_report": 200, "sales_report": 200}, "working": ["checkout", "goods_receipt", "product_lookup", "purchase_order", "return", "sales_report", "z_report"]},
+{"stopped": "legacy-db", "results": {"product_lookup": 500, "checkout": "RemoteProtocolError", "return": "setup failed: expected 201, got 500: Internal Server Error", "purchase_order": "RemoteProtocolError", "goods_receipt": "setup failed: expected 201, got 500: Internal Server Error", "z_report": "RemoteProtocolError", "sales_report": 500}, "working": []}
+]

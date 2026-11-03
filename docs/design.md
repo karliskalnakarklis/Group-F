@@ -452,41 +452,534 @@ undone in reverse order.
 
 ## Variant B: capability-aligned
 
+The services follow what Frischwerk does, not the legacy tables: selling at
+the till, assortment and purchasing, customers and loyalty, and sales
+reporting for head office. Four capabilities plus the gateway, the same
+number of services as variant A, so that the comparison is fair.
+
+Team fit (Head of Development: two teams, four developers): team "Store"
+owns `till`; team "Head office" owns `purchasing`, `customers` and
+`reporting`.
+
+Data minimisation (Data Protection Officer): no service of B stores personal
+data of employees (names, SSN, address, passwords); the PoS needs only the
+employee ID (a "staff ID"). Personal data of customers lives only in
+`customers`; every other service keeps only the `customer_id`. Vendors
+(suppliers) are companies, not persons.
+
+All decisions common to both variants apply unchanged: synchronous HTTP, no
+broker, the leader pattern, "Receipts and undo" with `applied_steps`, the
+"Conventions for calls between services", 2 s per call between services,
+20 s at the gateway, and no preparation for the change requests in v1.
+
 ### Services
 
-| Service | Capability | Owns (its own model) | Copies of data from others (source, how kept current) | Store |
+| Service | Capability (bounded context) | Owns (its own model) | Copies of data from others (source, how kept current) | Store |
 |---------|------------|----------------------|--------------------------------------------------------|-------|
-| gateway | routing, composition | none | none | none |
-| | | | | |
+| gateway | routing only: every contract endpoint goes to one leader | none | none | none |
+| till | **Selling at the till**: register shifts and the Z-report, sales, returns and refunds, gift cards, stock on hand, the tax rate (v1) | shifts, sales, sale lines, payments, returns, return lines, gift cards, stock on hand, tax rates, ledger outbox, `applied_steps` | **price list** `product_id → unit_price` (source: purchasing; initial load from the seed at start, then pulled from `GET purchasing /internal/price-list` every 60 s; if the pull fails, the last copy stays). **Registers of each store** `register → store` (source: store administration, outside the PoS; loaded from the seed at start; no contract use case changes them). **Staff IDs** (source: HR, outside the PoS; loaded from the seed at start; no contract use case changes them) | `till-db` |
+| purchasing | **Assortment and purchasing**: product master, suppliers, purchase orders, goods receipt | products (name, brand, description, category, subcategory, retail price, cost, supplier; **not** stock), suppliers, purchase orders, order lines | **Staff IDs** (source: HR; loaded from the seed at start) | `purchasing-db` |
+| customers | **Customers and loyalty**: customer profiles, reward points | customers (first and last name, email, phone, street, zip code, city, reward points; no legacy password, no US state), `applied_steps` | none | `customers-db` |
+| reporting | **Sales reporting** for head office and finance | the sales ledger: sale entries with their lines, refund entries; `applied_steps` | **Sale and refund entries** (source: till; delivered by a transactional outbox over HTTP, see "Ledger delivery"). **Store list** (source: store administration; loaded from the seed at start) | `reporting-db` |
 
 ### Components
 
 ```mermaid
 flowchart LR
     client[Client] --> gw[gateway]
+    gw --> till & purchasing & customers & reporting
+    till -->|earn points| customers
+    till -->|ledger entries, outbox| reporting
+    till -->|price list, every 60 s| purchasing
+    purchasing -->|stock on hand, receive stock| till
+    till --> tdb[(till-db)]
+    purchasing --> pdb[(purchasing-db)]
+    customers --> cdb[(customers-db)]
+    reporting --> rdb[(reporting-db)]
 ```
 
+Networks: each store shares a network only with its owner (`till-net`,
+`purchasing-net`, `customers-net`, `reporting-net`). The gateway and the four
+application services share the network `backend`. Only the gateway publishes
+a port (`8000:8000`).
+
 ### Use case flows
+
+All calls are synchronous HTTP. The gateway only routes: every contract
+endpoint goes to exactly one service, the **leader** of that use case, which
+makes all further calls. As in variant A, a use case gets a sequence diagram
+only when its leader calls another service.
+
+| Use case | Endpoint | Leader | Other services called | Flow |
+|----------|----------|--------|-----------------------|------|
+| Look up a product | `GET /products/{id}` | purchasing | till (stock on hand) | [Look up a product](#look-up-a-product) |
+| Register a customer | `POST /customers` | customers | none | no diagram |
+| Look up a customer | `GET /customers/{id}` | customers | none | no diagram |
+| Issue a gift card | `POST /gift-cards` | till | none | no diagram |
+| Check a gift card balance | `GET /gift-cards/{id}` | till | none | no diagram |
+| Open a register | `POST /registers/{r}/open` | till | none | no diagram |
+| Close a register (Z-report) | `POST /registers/{r}/close` | till | none | no diagram, see below |
+| Checkout | `POST /sales` | till | customers (only with `customer_id`), reporting (ledger delivery after commit) | [Checkout (B)](#checkout-b) |
+| Look up a sale | `GET /sales/{id}` | till | none | no diagram |
+| Return | `POST /returns` | till | reporting (ledger delivery after commit) | [Return (B)](#return-b) |
+| Create a purchase order | `POST /purchase-orders` | purchasing | none | no diagram |
+| Look up a purchase order | `GET /purchase-orders/{id}` | purchasing | none | no diagram |
+| Goods receipt | `POST /purchase-orders/{id}/receipt` | purchasing | till (receive stock) | [Goods receipt (B)](#goods-receipt-b) |
+| Sales report | `GET /reports/sales` | reporting | none | no diagram, see below |
+
+Background work, not a contract use case: till pulls the price list from
+purchasing every 60 s, and till retries undelivered ledger entries every 2 s
+(see "Ledger delivery to reporting").
+
+Use cases without a diagram, in detail:
+
+- **Register a customer / look up a customer (customers):** one transaction
+  in customers. A new customer has `reward_points` `0`. The answer is the same
+  as in the monolith: `{ customer_id, first_name, last_name, email,
+  reward_points }`; `404 customer not found`.
+- **Issue / check a gift card (till):** one transaction in till;
+  `{ gift_card_id, balance }`; `404 gift card not found`.
+- **Open a register (till):** one transaction: employee in the staff IDs
+  (`404 employee not found`), register exists (`404 register not found`),
+  lock the register row `FOR UPDATE`, no open shift of that register
+  (`409 register <r> is already open`), insert the shift. Answer
+  `{ session_id, register, opened_at }`; `session_id` is the shift ID.
+- **Close a register (till):** one transaction: employee
+  (`404 employee not found`), register exists (`404 register not found`),
+  lock the register row and the open shift row `FOR UPDATE`, no open shift
+  → `409 register <r> is not open`. Then, in the same transaction while the
+  shift row is locked, compute the Z-report from the shift's sales, payments
+  and returns, and close the shift (`closed_at`, `closed_by`,
+  `counted_cash`). Every sale and return transaction takes a **shared** lock on
+  its shift row and checks again that the shift is open, so a sale either
+  commits before the close (and is in the Z-report) or fails with
+  `409 register`. The race of variant A ("a sale in progress while the
+  register is closed") cannot happen.
+- **Look up a sale (till):** local; the sale stores its register number and
+  shift. `404 sale not found`.
+- **Create a purchase order (purchasing):** one transaction: supplier exists
+  (`404 vendor not found`), employee in the staff IDs
+  (`404 employee not found`), every product exists (`404 product not found`)
+  and is supplied by the vendor (`422 product <p> is not supplied by vendor
+  <v>`), `total_cost` = sum of `qty × cost`. Status `open`.
+- **Look up a purchase order (purchasing):** local; `404 purchase order not
+  found`.
+- **Sales report (reporting):** local from the ledger: store exists
+  (`404 store not found`); sale entries and refund entries of the store with
+  a date in the range (both inclusive); `sales_count`, `gross_total` (sum of
+  `total`), `tax_total` (sum of `tax`), `refunds_total`,
+  `net_revenue = gross_total - refunds_total`; `top_products`: at most five
+  products by quantity sold (sum of the sale entry lines, not reduced by
+  returns), highest first, ties by the lower `product_id`, as in the monolith.
+
+#### Look up a product
+
+Use case: show a product with its price, cost and stock. Endpoint
+`GET /products/{id}`. The product master is in purchasing, stock on hand is in
+till.
 
 ```mermaid
 sequenceDiagram
     participant C as Client
     participant G as gateway
+    participant P as purchasing
+    participant T as till
+    C->>G: GET /products/{id}
+    G->>P: GET /products/{id}
+    Note over P: product exists? (404 product)
+    P->>T: GET /internal/stock/{id}
+    Note right of T: 404 product, else on_hand
+    Note over P: product body with in_stock = on_hand<br/>(till down → 503 till unavailable)
+    P-->>G: 200 product
+    G-->>C: 200 product
+```
+
+#### Checkout (B)
+
+Use case: a cashier sells products at an open register, optionally to a
+customer, paid with cash, card and/or gift cards. Endpoint `POST /sales`.
+Everything except the reward points is till's own data, so the sale itself is
+one local transaction: no saga for stock or gift cards.
+
+Checks, in this order, read without locks:
+
+1. register exists (`404 register not found`), it has an open shift
+   (`409 register <r> is not open`);
+2. employee in the staff IDs (`404 employee not found`);
+3. every product in the price list (`404 product not found`);
+4. enough stock per product, lines of one product added up
+   (`409 not enough stock for product <p>`);
+5. totals: `line_total = qty × unit_price`, `subtotal` = sum,
+   `tax = subtotal × rate` (rate of the latest tax year), `total = subtotal +
+   tax`, each rounded half up to 0.01 as in the monolith;
+6. payments add up to `total` (`422 payments add up to …, but the total is
+   …`);
+7. every gift card payment has a `gift_card_id` (`422`), the card exists
+   (`404 gift card not found`) and its balance covers the sum of all payments
+   with that card (`409 gift card <g> balance too low`).
+
+The customer is checked only in step 8, by the `earn` call. This differs from
+the monolith only when several rules are broken at once (an unknown customer
+together with, for example, a payment error gives the payment error).
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant G as gateway
+    participant T as till
+    participant CU as customers
+    participant R as reporting
     C->>G: POST /sales
+    G->>T: POST /sales
+    Note over T: checks 1-7 without locks:<br/>register, open shift, employee, products,<br/>stock, totals, payments, gift cards
+    opt with customer_id
+        T->>CU: POST /internal/customers/{id}/earn {total}
+        Note right of CU: step earn_points:<br/>404 customer, else points earned
+    end
+    Note over T: one transaction: shift row LOCK IN SHARE MODE,<br/>still open (409 register); stock and gift card rows<br/>FOR UPDATE, checked again (409 stock, 409 gift card);<br/>insert sale, lines, payments; reduce stock;<br/>debit gift cards; insert ledger outbox row
+    opt earn failed or timed out, or the transaction failed
+        T->>CU: POST /internal/undo {step: earn_points}
+        T-->>G: error
+    end
+    T->>R: POST /internal/ledger/sales (step record_sale)
+    Note over T: 200 → outbox row delivered;<br/>failure → stays in the outbox, retried
+    T-->>G: 201 sale (reward_points_earned from earn, 0 without customer)
     G-->>C: 201 sale
 ```
 
+#### Return (B)
+
+Use case: a customer brings back products of an earlier sale at an open
+register (not necessarily the register of the sale) and gets a cash refund.
+Endpoint `POST /returns`. Sale, stock and shift are all in till.
+
+Checks, in this order: sale exists (`404 sale not found`); register exists
+(`404 register not found`) and has an open shift (`409 register <r> is not
+open`); employee in the staff IDs (`404 employee not found`); every line is a
+product of the sale (`409 product <p> is not part of sale <s>, cannot return
+it`) and not more than sold minus already returned (`409 cannot return more
+of product <p> than was sold`). `refund_amount = money(net) + money(net ×
+rate of the sale)`, where `net` = sum of `qty × unit_price` from the sale, as
+in the monolith.
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant G as gateway
+    participant T as till
+    participant R as reporting
+    C->>G: POST /returns
+    G->>T: POST /returns
+    Note over T: checks: sale, register, open shift,<br/>employee, lines and quantities
+    Note over T: one transaction: shift row LOCK IN SHARE MODE,<br/>still open (409 register); lock the sale FOR UPDATE,<br/>check the quantities again (409 return);<br/>insert return and lines; add stock back;<br/>insert ledger outbox row (refund entry)
+    T->>R: POST /internal/ledger/refunds (step record_refund)
+    T-->>G: 201 return
+    G-->>C: 201 return
+```
+
+The refund entry carries the store of the **return's** register, as the
+contract says.
+
+#### Goods receipt (B)
+
+Use case: an employee confirms that an ordered delivery arrived; the ordered
+quantities go into stock. Endpoint `POST /purchase-orders/{id}/receipt`. The
+order is purchasing's, stock on hand is till's: this is the one use case where
+purchasing writes into till.
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant G as gateway
+    participant P as purchasing
+    participant T as till
+    C->>G: POST /purchase-orders/{id}/receipt
+    G->>P: POST /purchase-orders/{id}/receipt
+    Note over P: order exists (404 purchase order),<br/>employee (404 employee),<br/>not received yet (409 received)
+    P->>T: POST /internal/stock/receive {lines}
+    Note right of T: step receive_stock: one transaction,<br/>404 product, else stock added
+    Note over P: one transaction: lock the order FOR UPDATE,<br/>still not received (409 received), set received
+    opt receive failed or timed out, or the transaction failed
+        P->>T: POST /internal/undo {step: receive_stock}
+        P-->>G: error
+    end
+    P-->>G: 200 purchase order
+    G-->>C: 200 purchase order
+```
+
+#### Price list refresh and ledger retry (background)
+
+```mermaid
+sequenceDiagram
+    participant T as till
+    participant P as purchasing
+    participant R as reporting
+    loop every 60 s
+        T->>P: GET /internal/price-list
+        Note over T: upsert price list;<br/>failure → keep the last copy
+    end
+    loop every 2 s
+        Note over T: undelivered outbox rows, oldest first
+        T->>R: POST /internal/ledger/sales or /refunds<br/>(original X-Request-Id)
+        Note over T: 200 → delivered; failure → stop, try again next round
+    end
+```
+
+The price list pull is not part of a client request; it gets its own new
+`X-Request-Id` and is logged like every other call.
+
+### Service APIs
+
+The contract endpoints are served by their leader (see the use case table).
+These are the internal calls between services. They follow "Conventions for
+calls between services": the `X-Request-Id` header on every call, errors as
+`{ "detail" }` passed on unchanged, `503 "<service> unavailable"` after 2 s or
+when the service cannot be reached. A call marked with a step name changes
+data, writes a receipt in `applied_steps`, and is undone with
+`POST /internal/undo` `{ "step": "<step name>" }`.
+
+**till**
+
+| Call | Request | Answer | Errors | Step | Used by |
+|------|---------|--------|--------|------|---------|
+| `GET /internal/stock/{product_id}` | none | `200` `{ product_id, on_hand }` | `404 product not found` | none (read only) | purchasing (look up a product) |
+| `POST /internal/stock/receive` | `{ lines: [ { product_id, qty } ] }` | `200` `{ lines }` | `404 product not found` | `receive_stock` | purchasing (goods receipt) |
+| `POST /internal/undo` | `{ step }` | `200` | none | shared | purchasing |
+
+`/internal/stock/receive` adds up lines of one product, checks that every
+product exists in the stock table, and adds all lines in one transaction with
+the receipt; the receipt's `changes` are the added lines, the undo subtracts
+them.
+
+**customers**
+
+| Call | Request | Answer | Errors | Step | Used by |
+|------|---------|--------|--------|------|---------|
+| `POST /internal/customers/{id}/earn` | `{ total }` | `200` `{ customer_id, points_earned, reward_points }` | `404 customer not found` | `earn_points` | till (checkout) |
+| `POST /internal/undo` | `{ step }` | `200` | none | shared | till |
+
+The loyalty rule belongs to the loyalty context, so it lives here: v1
+`points_earned = floor(total)`. The receipt's `changes` are
+`{ customer_id, points }`; the undo subtracts exactly these points. The call
+answers no personal data.
+
+**reporting**
+
+| Call | Request | Answer | Errors | Step | Used by |
+|------|---------|--------|--------|------|---------|
+| `POST /internal/ledger/sales` | `{ sale_id, store, date, total, tax, lines: [ { product_id, qty } ] }` | `200` `{ sale_id }` | none | `record_sale` | till (after a checkout, and the outbox retry) |
+| `POST /internal/ledger/refunds` | `{ return_id, sale_id, store, date, refund_amount }` | `200` `{ return_id }` | none | `record_refund` | till (after a return, and the outbox retry) |
+| `POST /internal/undo` | `{ step }` | `200` | none | shared | nobody (ledger entries are never undone) |
+
+A repeated delivery with the same `X-Request-Id` finds the receipt `done` and
+answers as before without writing again (idempotent). `/internal/undo` exists
+because the code in `common/` is the same for every writer; till never calls
+it on reporting.
+
+**purchasing**
+
+| Call | Request | Answer | Errors | Step | Used by |
+|------|---------|--------|--------|------|---------|
+| `GET /internal/price-list` | none | `200` `[ { product_id, unit_price } ]` | none | none (read only) | till (refresh every 60 s) |
+
+`applied_steps` exists in `till-db`, `customers-db` and `reporting-db`: the
+services that change data on request of another service.
+
+### Ledger delivery to reporting
+
+A transactional outbox over HTTP, without a broker:
+
+- The outbox row is written in the **same transaction** as the sale or the
+  return, together with the request's `X-Request-Id`. Payload for a sale:
+  `{ sale_id, store, date, total, tax, lines: [ { product_id, qty } ] }`; for a
+  return: `{ return_id, sale_id, store, date, refund_amount }`. `store` is the
+  store of the register of the sale or return; `date` is its date in
+  Europe/Zurich.
+- Right after the commit, till posts the row to
+  `POST reporting /internal/ledger/sales` (step `record_sale`) or
+  `/internal/ledger/refunds` (step `record_refund`), with a 2 s timeout and the
+  original `X-Request-Id`, and marks it delivered on `200`. A failure never
+  fails the sale or return: the client still gets its `201`.
+- A background task in till sends the undelivered rows every 2 s, oldest
+  first, with their original `X-Request-Id`; it stops at the first failure and
+  tries again in the next round. It only takes rows older than 2 s, so it
+  rarely races the delivery right after the commit; when it does, the receipt
+  makes the second delivery harmless.
+- Reporting records every entry together with its `applied_steps` receipt in
+  one transaction, so a repeated delivery answers as before and changes
+  nothing.
+- Ledger entries are never undone: they are only sent after the sale or
+  return is final.
+- The number of undelivered rows in the outbox is the visible size of the gap
+  while reporting is down.
+
 ### Language
+
+Inside every service the names follow the business. The gateway and the
+contract keep the contract names (`sale_id`, `session_id`, `register`,
+`vendor_id`, …); each service maps them at its edge.
 
 | Legacy name | Name in this variant | Service |
 |-------------|----------------------|---------|
-| ticket_system | | |
-| | | |
+| `registers_table` (register session) | shift (`shifts`; `session_id` in the contract = shift ID) | till |
+| `store_registers` | register of a store (`registers`) | till |
+| `ticket_system` | sale (`sales`) | till |
+| `item_list` | sale line (`sale_lines`) | till |
+| `cart_inprogress` | dropped: a sale has its lines | – |
+| `ticket_system.cash`, `.credit`, `ticket_gift_payment` | payment with a tender: cash, card, gift card (`payments`) | till |
+| `return_table`, `return_items` | return, return line, refund (`returns`, `return_lines`) | till |
+| `gift_card` | gift card (`gift_cards`) | till |
+| `tax_table` | tax rate (`tax_rates`) | till |
+| `product_inventory.in_stock` | stock on hand (`stock`) | till |
+| `product_inventory.unit_price` | price list entry (`price_list`, a copy) | till |
+| `product_inventory` (rest) | product (`products`), retail price, cost | purchasing |
+| `vendorinfo` | supplier (`suppliers`; `vendor_id` in the contract) | purchasing |
+| `orders_ticket`, `orders` | purchase order, order line, goods receipt (`purchase_orders`, `order_lines`) | purchasing |
+| `customer_info` | customer and points account (`customers`, `reward_points`) | customers |
+| `employee_info` | staff member, ID only (`staff`) | till, purchasing |
+| `stores` | store (`stores`, ID only) | reporting |
+| – (new) | ledger entry: sale entry, refund entry (`sale_entries`, `sale_entry_lines`, `refund_entries`) | reporting |
+
+Money columns are `DECIMAL(12,2)`; rates are `DECIMAL(6,4)`. Phone numbers
+and zip codes are strings in customers.
+
+### Copies
+
+| Copy | Kept in | Source | How it is kept current | How stale it can be |
+|------|---------|--------|------------------------|---------------------|
+| price list (`product_id → unit_price`) | till | purchasing | loaded from the seed at the first start; pulled from `GET /internal/price-list` every 60 s (upsert); a failed pull keeps the last copy | up to 60 s, longer while purchasing is down. No contract use case changes a price, so in this assignment it never differs. |
+| registers of each store | till | store administration (outside the PoS) | loaded from the seed at the first start | never changes in the contract |
+| staff IDs | till, purchasing | HR (outside the PoS) | loaded from the seed at the first start | never changes in the contract |
+| store list | reporting | store administration (outside the PoS) | loaded from the seed at the first start | never changes in the contract |
+| sale entries, refund entries | reporting | till | transactional outbox, delivered right after the commit and retried every 2 s | normally none: delivered before the `201` is sent; while reporting is down, until it is back (a few seconds after) |
+
+"Loaded from the seed at the first start" means: a service loads its part of
+the seed only when its tables are empty, so a restart keeps the data
+(`blast` stops and restarts containers without resetting data).
 
 ### All-or-nothing
+
+We follow the shared rule: checks first, then the writes in other services,
+then the leader's own transaction. If a step fails, the earlier writes are
+undone in reverse order.
+
+- **Checkout:** the only write in another service is `earn_points` in
+  customers, and only with a customer. Till writes the sale in its own
+  transaction afterwards. If `earn_points` fails or times out, till undoes
+  `earn_points` and answers the error. If the re-check or the transaction
+  fails, till undoes `earn_points` and answers the error. Stock and gift cards
+  are till's, so they are checked again and changed in the same transaction
+  with the rows locked `FOR UPDATE` (shared rule "check and change in one
+  step"): two sales of the last item never both succeed, a gift card never
+  goes below zero. Rows are locked in a fixed order (shift, then products by
+  ID, then gift cards by ID) so that two sales cannot deadlock.
+- **Ledger delivery** comes after the commit and is not part of the
+  all-or-nothing: the sale is final, the entry is delivered sooner or later
+  (see "Ledger delivery to reporting").
+- **Return:** one transaction in till (shift shared lock, sale `FOR UPDATE`,
+  quantities checked again, return, stock back, outbox row). No other service
+  is written before it in v1, so there is nothing to undo.
+- **Open / close / Z-report:** one transaction in till each; see the use case
+  details above.
+- **Goods receipt:** purchasing calls `receive_stock` in till, then sets the
+  order received in its own transaction with the order row locked and checks
+  again that it is not received. If `receive_stock` fails or times out, or the
+  re-check or the transaction fails, purchasing undoes `receive_stock`. Two
+  receipts of the same order at the same time: both add stock, one wins the
+  lock, the other undoes its `receive_stock` and answers `409 received`.
+- **Transactions see the latest commits:** every service runs its database
+  sessions in `READ COMMITTED`, so a check that runs after a lock is taken
+  (for example the Z-report sums after the shift row is locked) sees every
+  transaction that committed before the lock was granted.
+- **Database down:** a service whose own database cannot be reached answers
+  `503 "<service> database unavailable"`; a leader passes it on unchanged.
+- **Receipts:** `applied_steps` in `till-db` (`receive_stock`),
+  `customers-db` (`earn_points`) and `reporting-db` (`record_sale`,
+  `record_refund`), following "Receipts and undo" in the common decisions. An
+  undo after a timeout follows the same rule as after an error.
 
 ### Failure behaviour
 
 | What fails | What happens | Why this is acceptable or not |
 |------------|--------------|-------------------------------|
-| | | |
+| till or `till-db` | No sale, sale lookup, return, gift card, register open or close, Z-report. Product lookup (no stock) and goods receipt fail too. Purchase orders, customers and the sales report keep working. | Expected: till is the selling capability. It is the only container pair that every checkout needs. |
+| customers or `customers-db` | A sale **with** a customer fails (`503`); sales without a customer, returns, register open and close keep working. Customer endpoints fail. From v2 (CR2), a return of a sale **with** a customer fails too (it takes the points back). | Acceptable: the cashier completes the sale without the loyalty card. Note for `make blast-b`: its checkout and return probes sell to a customer, so they show FAIL; the return itself does not call customers. |
+| purchasing or `purchasing-db` | Checkout, returns, Z-report and sales report keep working (till uses its copy of the price list). Product lookup, purchase orders and goods receipt fail. | Acceptable: back office. |
+| reporting or `reporting-db` | Checkout and returns keep working; the ledger entries wait in till's outbox. The sales report fails. When reporting is back, the outbox delivers within a few seconds. | Acceptable for the store manager. Head of Finance: the report lags only during the outage, and the gap is visible as undelivered outbox rows. |
+| a sale or return runs while its register is closed | Cannot happen: the close locks the shift row, every sale and return takes a shared lock on it and checks again that the shift is open. | – |
+| an undo fails (the owner is down when the undo is sent) | As in variant A: the leader logs an error, and the data may stay half done (for example points earned for a sale that does not exist, or stock received for an order that is still open). | Known gap, accepted for this assignment, same as A. A timeout alone does not leave data half done (see "Receipts and undo"). |
+
+### Why this cut
+
+Granularity drivers (Ford et al., *Software Architecture: The Hard Parts*,
+ch. 7): disintegrators pull a service apart, integrators pull it together.
+
+- **till merges** selling, returns, register shifts, gift cards and stock on
+  hand. Integrators: **database transactions** (a sale reduces stock, debits
+  gift cards and must belong to an open shift, atomically; a return checks the
+  sale's lines; the Z-report must cover exactly the shift's sales) and
+  **workflow** (every checkout needs all of them). Result: checkout is one
+  local transaction, no saga for stock or gift cards, and the race of variant
+  A "sale in progress while the register is closed" cannot happen.
+- **purchasing is split off.** Disintegrators: **fault tolerance** (store
+  manager: checkout must work when the back office is down; till keeps its own
+  price list) and a different **rate of change** and team (head office).
+  Products, suppliers and orders stay together (integrator: **data
+  relationships**, "every product must be supplied by the order's vendor").
+- **customers is split off.** Disintegrators: **security** (personal data in
+  one place, with its own access control) and **volatility** (the loyalty
+  programme on the roadmap lands in one context).
+- **reporting is split off.** Disintegrators: **fault tolerance** and
+  **scalability** (report queries never load till's database; checkout works
+  when reporting is down), and its own model for finance (a ledger).
+- **Price of the cut:** a product lookup needs two services; goods receipt
+  writes into till; the report reads a copy that lags while reporting is down;
+  a sale with a customer needs customers.
+
+### Version 2: change requests (applied only after `b-v1`)
+
+Version 1 contains none of this (shared policy "no preparation").
+
+- **CR1:** till computes VAT per category exactly as
+  `docs/change-requests.md` (gross prices; per rate `gross`, `vat`, `net`;
+  lowest rate first; `tax` = sum of `vat`; `subtotal = total - tax`), stores
+  the VAT lines with the sale, the Z-report gets `vat` and `tax_total` as their
+  sum; refund = gross. The price list needs the category: purchasing's
+  `GET /internal/price-list` adds `category`, till's seed load and refresh
+  read it. The sale ledger entry carries the VAT lines; reporting sums them
+  per rate (not reduced by returns), `tax_total` = sum of `vat`. The tax rate
+  is no longer used.
+- **CR2:** customers keeps a movements table (earn: date, total; refund: sale
+  date, amount), computes `spend_12m` (today and the 364 days before,
+  Europe/Zurich) and the tier before the sale (bronze < 500 ≤ silver < 2000 ≤
+  gold; 1/2/3 points per full CHF). `earn` takes `{ total, date }` and answers
+  also `{ tier, points_per_chf }`. New
+  `POST /internal/customers/{id}/refund` `{ sale_date, refund_amount,
+  points_per_chf }` (step `refund_points`): points minus
+  `floor(refund_amount) × points_per_chf`, never below 0; the receipt records
+  the points actually removed, so the undo restores exactly that.
+  `GET /customers/{id}` adds `tier` and `spend_12m`. Till stores `tier` and
+  `points_per_chf` with the sale, returns `tier` (`null` without customer), and
+  a return of a sale with a customer calls `refund` before its own transaction
+  (undo on failure, as in checkout).
+
+### Decisions taken by the agent
+
+| # | Decision | Why |
+|---|----------|-----|
+| 1 | Every service runs its database sessions in `READ COMMITTED`. | With MariaDB's default `REPEATABLE READ`, the snapshot of the closing transaction can be taken before the shift row lock is granted, so the Z-report sums could miss a sale that committed while the close waited for the lock. |
+| 2 | A service whose own database cannot be reached answers `503 "<service> database unavailable"`; leaders pass it on. | The conventions only define `503` for calls between services; without this, a stopped store would give a `500` that a leader cannot classify. |
+| 3 | Open a register locks the **register** row `FOR UPDATE` (there is no shift row yet); close locks the register row and then the open shift row. | Two opens of one register at the same time must not both create a shift. |
+| 4 | Lock order in till: register, shift, products by ID, gift cards by ID; a return takes shift, sale, products by ID. | A fixed order prevents deadlocks between concurrent sales and returns. |
+| 5 | The outbox retry takes only rows older than 2 s and stops at the first failed delivery of a round. | Keeps the retry from racing the delivery right after the commit in normal operation, and keeps entries in order. Correctness does not depend on it (deliveries are idempotent). |
+| 6 | reporting exposes the shared `/internal/undo`, but nobody calls it. | Same `common/` code in every writer; ledger entries are never undone. |
+| 7 | The price list pull uses a new `X-Request-Id` per pull and is logged like any call. | It belongs to no client request. |
+| 8 | A service loads its part of the seed only when its tables are empty. | A restart (for example by `make blast-b`) must not duplicate or reset data. |
+| 9 | Checks of open, close and purchase order follow the order of the monolith (employee before register in open and close; order before employee in goods receipt). | §9 of the prompt does not fix this order; the monolith is the reference for errors. |
+| 10 | Response bodies are those of the monolith where the contract shows `...`: `POST /customers` answers `{ customer_id, first_name, last_name, email, reward_points }`; the payments of a sale are listed as one cash entry, one card entry and one entry per gift card payment. | The contract leaves these open; the monolith is the reference. |
+| 11 | The planned v2 changes (CR1, CR2) are written down in this section now, but not implemented before `b-v1`. | They are part of the group's decisions; writing them down is no code preparation. |
+| 12 | A call between services resolves the service name itself, within the same 2 s budget (`common/client.py`). The gateway therefore answers `503` within 2 s, not "at once", when a leader is stopped. | Docker's DNS needs about 4 s to fail for a stopped container, and the httpx timeout does not cover the lookup: a checkout with a customer took more than 10 s while customers was down. |
+| 13 | The gateway answers `404 not found` for a path that belongs to no use case, and does not route `/internal/` paths. | Only the gateway calls the contract paths; internal calls stay between services. |
+| 14 | v2: till drops its tax rates (table, seed load, the rate stored with a sale); VAT rates are two constants by category in till. | CR1: `tax_table` is no longer used; the categories and rates are fixed by the change request. |
+| 15 | v2: customers keeps one movement per earn (sale date, total) and per refund (sale date, refund amount); `spend_12m` is the sum of earn minus refund movements with a sale date in the 365 days up to the given date (`date` of the sale for the tier, today for `GET /customers/{id}`). The receipts of `earn_points` and `refund_points` also record the movement, so an undo removes it. | CR2 defines spend by the sale date ("returns of those sales"); the undo must also leave the spend as it was. |
+| 16 | v2: till stores `tier` and `points_per_chf` with the sale; the return sends `points_per_chf` of the original sale to `refund`. Returns of a sale with a customer therefore need customers (failure table). | CR2 3: points are taken back at the rate of the original sale. |
