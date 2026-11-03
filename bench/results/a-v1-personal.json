@@ -1,0 +1,8 @@
+{"stack": "a", "level": "v1", "measured_at": "2026-11-03T21:12:05+00:00", "search_terms": 23,
+ "stores_with_personal_data": 1, "stores_total": 4,
+ "stores": [
+  {"store": "inventory-db", "owner": "inventory", "personal_data": false, "terms_found": 0, "tables": []},
+  {"store": "people-db", "owner": "people", "personal_data": true, "terms_found": 23, "tables": ["customer_info","employee_info"]},
+  {"store": "sales-db", "owner": "sales", "personal_data": false, "terms_found": 0, "tables": []},
+  {"store": "stores-db", "owner": "stores", "personal_data": false, "terms_found": 0, "tables": []}
+ ]}
