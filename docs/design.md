@@ -1196,7 +1196,7 @@ review.
   and `standard` (0.081); `vat_category` lists the seven reduced categories.
 - **Defaults for sales without a customer:** `ticket_system.tier` is null and
   `ticket_system.points_rate` is `0`. `item_list.vat_rate` has the default
-  `0` so that the column could be added to the legacy table.
+  `0`, so that the migration can add it to a table that already has lines.
 - **Index:** `ticket_system` gets an index on `customer_id`, for the spend
   query.
 - **Spend:** sales computes `spend_12m` as the sum of `total` of the
@@ -1218,19 +1218,29 @@ review.
   so that fewer lines change.
 - **Legacy customers** start with a spend of `0` (the seed has no sales
   history); their legacy `rewards` stay.
-- **No migration:** new tables and columns are created by the schema at start
-  (`CREATE TABLE IF NOT EXISTS`), so they exist only in a fresh database;
-  `make up-a` resets all data.
+- **Migration from version 1** (`ai-log/findings.md`, A5). `CREATE TABLE IF
+  NOT EXISTS` leaves existing tables as they are, so sales runs a migration
+  at every start, after the schema: it adds the new columns of
+  `ticket_system` and `item_list` (`ADD COLUMN IF NOT EXISTS`) and writes the
+  VAT rates and reduced categories (`INSERT IGNORE`). On a database that is
+  already at version 2 it changes nothing; the VAT rows are no longer written
+  by `fill()`.
+- **Sales from version 1** after an upgrade: their `tax_rate` is the US rate
+  and their prices are net, while version 2 writes `tax_rate` as `0`. The
+  refund stays `money(net) + money(net × tax_rate)`, which is the gross
+  amount for a version 2 sale and the version 1 refund for an older sale.
+  A return of an older sale takes back 1 point per CHF (what it earned;
+  `points_rate` is `0` there). Older sales have no `ticket_vat`, so the
+  `vat` of a report that covers them does not add up to its `tax_total`.
 
 #### Variant B
 
 - **The VAT rates** are a constant in till's code (from CR1), written into
   `vat_rates` at start. `vat_rate_of` takes the row of the category, else
   the `*` row.
-- **`sales.tax_rate` is replaced by `sales.tier`** in the same column
-  position. v1 needed the rate for the refund; with gross prices the refund
-  does not need it. The table `tax_rates` and the helper `tax_rate()` stay,
-  unused, so that fewer lines change.
+- **`sales.tax_rate` stays and is written as `0`**; `sales.tier` is a new
+  column (as in variant A). The table `tax_rates` and the helper
+  `tax_rate()` stay, unused, so that fewer lines change.
 - **`sold_at`** is taken before the `earn` call (the design fixes the sale's
   date there), so it is a few milliseconds earlier than the commit.
 - **`tax_total`** in the Z-report and the sales report is still the sum of
@@ -1239,13 +1249,28 @@ review.
 - **`POST /customers`** answers `tier` and `spend_12m` as well (the same body
   as `GET /customers/{id}`; a new customer is `bronze` with `0`). In
   customers this is local, so it costs no call.
-- **Return in till:** till's own transaction is opened before the
-  `take_back_points` call (`with Steps() as steps, transaction() as cur:`), so
-  that the v1 transaction block keeps its indentation and fewer lines change.
-  The connection holds no lock during the call; the first lock is the shared
-  lock on the shift, taken after it. `refund_amount` is computed in the
-  checks for the call and again under the lock, from the same lines and
-  prices.
+- **Return in till:** the `take_back_points` call comes before till's own
+  transaction is opened, as the design says, so that no database connection
+  is held while till waits for customers (`ai-log/findings.md`, B7). An
+  earlier version opened the transaction first to change fewer lines.
+  `refund_amount` is computed in the checks for the call and again under the
+  lock, from the same lines and prices.
 - **Legacy customers** start with a spend of `0` (the seed has no sales
   history); their legacy `reward_points` stay.
-- **No migration**, as in variant A; `make up-b` resets all data.
+- **Migration from version 1** (`ai-log/findings.md`, B6). till runs a
+  migration at every start, after the schema: it adds `price_list.category`,
+  `sales.tier` and `sale_lines.vat_rate` (`ADD COLUMN IF NOT EXISTS`), writes
+  the VAT rates (`INSERT IGNORE`) and sets the category of every price list
+  entry that has none, from the seed. On a database that is already at
+  version 2 it changes nothing. customers and reporting only get new tables,
+  which the schema creates.
+- **Sales from version 1** after an upgrade: the refund stays
+  `money(net) + money(net × tax_rate)` (gross for a version 2 sale, whose
+  `tax_rate` is `0`; the version 1 refund for an older sale). An older sale
+  has no tier: till sends `tier` null, and customers takes back 1 point per
+  CHF (what it earned) and adds no spend entry, because customers never
+  recorded that sale's spend. So in this variant the spend after an upgrade
+  counts only sales from version 2 on; a backfill from till's sales would
+  need a one-off migration across two services and is not done. Older sale
+  entries have no `sale_entry_vat`, so the `vat` of a report that covers them
+  does not add up to its `tax_total`.
