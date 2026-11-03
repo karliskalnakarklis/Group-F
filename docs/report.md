@@ -246,8 +246,16 @@ make is described in [`domain.md`](domain.md), "What the analysis changed".
 
 ## 8. Limits of this comparison
 
-> What does your setup not show? Think of everything running on one machine,
-> the size of the data, the number of stores and tills, the test-only reset.
+| Limit | What it means for our results |
+|-------|-------------------------------|
+| Everything runs on one machine | Calls between services never cross a real network, so a hop costs much less than in production. The latency gap between A (7 hops) and B (3 hops) would likely be larger (C3). |
+| Small data | The seed has 7 customers, 6 employees and a few products. Reports and the 365-day spend never get slow, so the cost of A's extra calls and B's copies is not visible at scale. |
+| Few stores and tills, one client | No load from many tills at once. The races we know of (a sale while its register closes, two checkouts of the last item) were never triggered, which matters for C5. |
+| The reset before every run | Every `make up` starts from the seed. A real upgrade from `v1` to `v2` on existing data was never measured, and the missing migrations (findings A5, B6) were found only by code review. |
+| 30 requests per measurement | Latency differences of a few milliseconds, such as between `v1` and `v2`, are noise. The hops are the more reliable number. |
+| One container stopped at a time | The blast test does not show two failures at once, or a service that is slow but still answers (C1). |
+| C4 searches emails and last names only | Phone numbers, addresses and SSNs are not counted. They are in the same tables, so the count does not change, but the metric does not show how much is stored (section 2). |
+| The code is written by an agent | The results reflect our design, but also how the agent filled the gaps (see `ai-log/findings.md`). Another implementation of the same cut could measure differently. |
 
 ## 9. Reflection on working with the coding agent
 
