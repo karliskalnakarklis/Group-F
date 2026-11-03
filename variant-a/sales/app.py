@@ -79,18 +79,37 @@ CREATE TABLE IF NOT EXISTS ticket_vat (
 VAT_RATES = {"reduced": "0.026", "standard": "0.081"}
 REDUCED = ("Dairy", "Produce", "Beef", "Poultry", "Pasta", "DryGoods", "PetFood")
 POINTS_PER_CHF = {"bronze": 1, "silver": 2, "gold": 3}  # CR2
+# Version 2 on a database that version 1 created: CREATE TABLE IF NOT EXISTS
+# leaves existing tables as they are, so the new columns are added here.
+MIGRATE_V2 = """
+ALTER TABLE ticket_system ADD COLUMN IF NOT EXISTS tier varchar(10) DEFAULT NULL,
+  ADD COLUMN IF NOT EXISTS points_rate int NOT NULL DEFAULT 0, ADD KEY IF NOT EXISTS customer_id (customer_id);
+ALTER TABLE item_list ADD COLUMN IF NOT EXISTS vat_rate decimal(6,4) NOT NULL DEFAULT 0
+"""
 
 
 def fill(cur, seed: dict) -> None:
     insert_rows(cur, "gift_card", seed["gift_card"])
     insert_rows(cur, "tax_table", seed["tax_table"])
-    insert_rows(cur, "vat_table", [{"vat_code": c, "vat_rate": r} for c, r in VAT_RATES.items()])
-    insert_rows(cur, "vat_category", [{"productType": t, "vat_code": "reduced"} for t in REDUCED])
+
+
+def migrate(cur) -> None:
+    """At every start: the v2 columns and the VAT rates of CR1, if missing.
+    Changes nothing on a database that is already at version 2."""
+    for statement in MIGRATE_V2.split(";"):
+        if statement.strip():
+            cur.execute(statement)
+    for code, rate in VAT_RATES.items():
+        cur.execute("INSERT IGNORE INTO vat_table (vat_code, vat_rate) VALUES (%s,%s)", (code, rate))
+    for product_type in REDUCED:
+        cur.execute("INSERT IGNORE INTO vat_category (productType, vat_code) VALUES (%s,'reduced')", (product_type,))
 
 
 @APP.on_event("startup")
 def startup():
     init_database(SCHEMA, fill, "tax_table")
+    with transaction() as cur:
+        migrate(cur)
 
 
 def tax_rate(cur) -> Decimal:
@@ -334,7 +353,7 @@ class ReturnIn(BaseModel):
 
 def check_return(cur, sale_id: int, wanted: dict[int, int]) -> Decimal:
     """Lines are in the sale and not more than sold minus already returned
-    (409 return). Answers the gross amount of the returned lines (CR1)."""
+    (409 return). Answers the amount of the returned lines at the sale's unit prices."""
     cid = one(cur, "SELECT CID FROM cart_inprogress WHERE ticket_id=%s", sale_id)["CID"]
     cur.execute("SELECT product_id, SUM(qty) AS qty, MAX(unit_price) AS unit_price FROM item_list"
                 " WHERE CID=%s GROUP BY product_id", (cid,))
@@ -360,17 +379,19 @@ def create_return(inp: ReturnIn):
     check_employee(inp.employee_id)
     wanted = added_up(inp.lines)
     with transaction() as cur:
-        refund = money(check_return(cur, inp.sale_id, wanted))
+        net = check_return(cur, inp.sale_id, wanted)
+    # tax_rate is 0 for a v2 sale (gross prices, CR1); a v1 sale keeps its v1 refund
+    refund = money(net) + money(net * Decimal(str(ticket["tax_rate"])))
     lines = [{"product_id": p, "qty": q} for p, q in wanted.items()]
     with Steps() as steps:
         steps.run("inventory", "give_stock_back", "/internal/stock/give-back", {"lines": lines})
-        if ticket["customer_id"] is not None:  # CR2: at the points rate of the sale
+        if ticket["customer_id"] is not None:  # CR2: at the points rate of the sale (a v1 sale earned 1 per CHF)
             steps.run("people", "take_back_points", f"/internal/customers/{ticket['customer_id']}/points/take-back",
-                      {"points": math.floor(refund) * ticket["points_rate"]})
+                      {"points": math.floor(refund) * (ticket["points_rate"] or 1)})
         with transaction() as cur:
             ticket = one(cur, "SELECT * FROM ticket_system WHERE ticket_id=%s FOR UPDATE", inp.sale_id)
             net = check_return(cur, inp.sale_id, wanted)  # checked again, sale locked
-            refund = money(net)
+            refund = money(net) + money(net * Decimal(str(ticket["tax_rate"])))
             at = now()
             cur.execute("INSERT INTO return_table (ticket_id, date, time, refunds, exchanges, register_id)"
                         " VALUES (%s,%s,%s,%s,0,%s)", (inp.sale_id, at.date(), at.time(), float(refund), session_id))

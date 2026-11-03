@@ -14,8 +14,8 @@ from fastapi import HTTPException
 from pydantic import BaseModel, Field
 
 from common.calllog import REQUEST_ID, STEP_KEY, Steps, call, call_ok, create_app, log, now
-from common.db import (APPLIED_STEPS, fail, finish_step, init_database, install_undo, money, one, require,
-                       start_step, transaction)
+from common.db import (APPLIED_STEPS, fail, finish_step, init_database, install_undo, load_seed, money, one,
+                       require, start_step, transaction)
 
 APP = create_app("till")
 PRICE_LIST_EVERY = 60.0   # seconds
@@ -58,8 +58,8 @@ CREATE TABLE IF NOT EXISTS sales (
   sale_id int NOT NULL AUTO_INCREMENT PRIMARY KEY,
   shift_id int NOT NULL, register int NOT NULL, sold_on date NOT NULL, sold_at datetime NOT NULL,
   staff_id int NOT NULL, customer_id int DEFAULT NULL,
-  subtotal decimal(12,2) NOT NULL, tax decimal(12,2) NOT NULL, tier varchar(10) DEFAULT NULL,
-  total decimal(12,2) NOT NULL, points_earned int NOT NULL DEFAULT 0,
+  subtotal decimal(12,2) NOT NULL, tax decimal(12,2) NOT NULL, tax_rate decimal(6,4) NOT NULL,
+  total decimal(12,2) NOT NULL, points_earned int NOT NULL DEFAULT 0, tier varchar(10) DEFAULT NULL,
   KEY shift (shift_id)
 );
 CREATE TABLE IF NOT EXISTS sale_lines (
@@ -95,6 +95,13 @@ CREATE TABLE IF NOT EXISTS ledger_outbox (
   KEY undelivered (delivered_at, entry_id)
 );
 """ + APPLIED_STEPS
+# Version 2 on a database that version 1 created: CREATE TABLE IF NOT EXISTS
+# leaves existing tables as they are, so the new columns are added here.
+MIGRATE_V2 = """
+ALTER TABLE price_list ADD COLUMN IF NOT EXISTS category varchar(50) NOT NULL DEFAULT '';
+ALTER TABLE sales ADD COLUMN IF NOT EXISTS tier varchar(10) DEFAULT NULL;
+ALTER TABLE sale_lines ADD COLUMN IF NOT EXISTS vat_rate decimal(6,4) NOT NULL DEFAULT 0
+"""
 
 
 def fill(cur, seed: dict) -> None:
@@ -114,13 +121,27 @@ def fill(cur, seed: dict) -> None:
     for g in seed["gift_card"]:
         cur.execute("INSERT INTO gift_cards (gift_card_id, balance) VALUES (%s,%s)",
                     (g["gift_id"], money(g["card_balance"])))
+
+
+def migrate(cur, seed: dict) -> None:
+    """At every start: the v2 columns, the VAT rates of CR1 and the category of
+    every price list entry (from the seed), if missing. Changes nothing on a
+    database that is already at version 2."""
+    for statement in MIGRATE_V2.split(";"):
+        if statement.strip():
+            cur.execute(statement)
     for category, rate in VAT_RATES.items():
-        cur.execute("INSERT INTO vat_rates (category, rate) VALUES (%s,%s)", (category, rate))
+        cur.execute("INSERT IGNORE INTO vat_rates (category, rate) VALUES (%s,%s)", (category, rate))
+    for p in seed["product_inventory"]:
+        cur.execute("UPDATE price_list SET category=%s WHERE product_id=%s AND category=''",
+                    (p["productType"], p["product_id"]))
 
 
 @APP.on_event("startup")
 def startup():
     init_database(SCHEMA, fill, "registers")
+    with transaction() as cur:
+        migrate(cur, load_seed())
     threading.Thread(target=refresh_price_list_forever, daemon=True).start()
     threading.Thread(target=deliver_outbox_forever, daemon=True).start()
 
@@ -378,9 +399,9 @@ def checkout(inp: SaleIn):
             check_stock(cur, wanted, lock=True)
             check_gift_cards(cur, gift_sums, lock=True)
             cur.execute("INSERT INTO sales (shift_id, register, sold_on, sold_at, staff_id, customer_id, subtotal,"
-                        " tax, tier, total, points_earned) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                        " tax, tax_rate, total, points_earned, tier) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,0,%s,%s,%s)",
                         (shift["shift_id"], inp.register, at.date(), at.replace(tzinfo=None), inp.employee_id,
-                         inp.customer_id, subtotal, tax, tier, total, points))
+                         inp.customer_id, subtotal, tax, total, points, tier))
             sale_id = cur.lastrowid
             for n, line in enumerate(inp.lines, start=1):
                 cur.execute("INSERT INTO sale_lines (sale_id, line_no, product_id, qty, unit_price, vat_rate)"
@@ -423,7 +444,7 @@ class ReturnIn(BaseModel):
 
 def check_return(cur, sale_id: int, wanted: dict[int, int]) -> Decimal:
     """Every line is a product of the sale, and not more than sold minus
-    already returned (409 return). Answers the gross amount of the lines (CR1)."""
+    already returned (409 return). Answers the amount of the lines at the sale's unit prices."""
     cur.execute("SELECT product_id, SUM(qty) AS qty, MAX(unit_price) AS unit_price FROM sale_lines"
                 " WHERE sale_id=%s GROUP BY product_id", (sale_id,))
     sold = {r["product_id"]: r for r in cur.fetchall()}
@@ -447,29 +468,35 @@ def create_return(inp: ReturnIn):
         sale = require(cur, "sale", "SELECT * FROM sales WHERE sale_id=%s", inp.sale_id)
         shift = require_open_shift(cur, inp.register)
         require_staff(cur, inp.employee_id)
-        refund = money(check_return(cur, inp.sale_id, wanted))
+        net = check_return(cur, inp.sale_id, wanted)
         store = store_of(cur, inp.register)
-    # CR2: take the points back first (only for a sale with a customer); undone if till's transaction fails
-    with Steps() as steps, transaction() as cur:
+    # tax_rate is 0 for a v2 sale (gross prices, CR1); a v1 sale keeps its v1 refund
+    refund = money(net) + money(net * Decimal(str(sale["tax_rate"])))
+    with Steps() as steps:
+        # CR2: take the points back first (only for a sale with a customer), before
+        # till's own transaction, so that no connection is held during the call
         if sale["customer_id"] is not None:
             steps.run("customers", "take_back_points", f"/internal/customers/{sale['customer_id']}/take-back",
                       {"refund_amount": float(refund), "tier": sale["tier"], "sale_date": sale["sold_on"].isoformat()})
-        hold_shift_open(cur, shift["shift_id"], inp.register)
-        sale = one(cur, "SELECT * FROM sales WHERE sale_id=%s FOR UPDATE", inp.sale_id)
-        net = check_return(cur, inp.sale_id, wanted)  # checked again, sale locked
-        refund = money(net)
-        at = now()
-        cur.execute("INSERT INTO returns (sale_id, shift_id, register, returned_on, returned_at, staff_id, refund_amount)"
-                    " VALUES (%s,%s,%s,%s,%s,%s,%s)", (inp.sale_id, shift["shift_id"], inp.register, at.date(),
-                                                      at.replace(tzinfo=None), inp.employee_id, refund))
-        return_id = cur.lastrowid
-        for product_id in sorted(wanted):
-            cur.execute("INSERT INTO return_lines (return_id, product_id, qty) VALUES (%s,%s,%s)",
-                        (return_id, product_id, wanted[product_id]))
-            cur.execute("UPDATE stock SET on_hand = on_hand + %s WHERE product_id=%s", (wanted[product_id], product_id))
-        entry_id = add_to_outbox(cur, "refund", {
-            "return_id": return_id, "sale_id": inp.sale_id, "store": store, "date": at.date().isoformat(),
-            "refund_amount": float(refund)})
+        with transaction() as cur:
+            hold_shift_open(cur, shift["shift_id"], inp.register)
+            sale = one(cur, "SELECT * FROM sales WHERE sale_id=%s FOR UPDATE", inp.sale_id)
+            net = check_return(cur, inp.sale_id, wanted)  # checked again, sale locked
+            refund = money(net) + money(net * Decimal(str(sale["tax_rate"])))
+            at = now()
+            cur.execute("INSERT INTO returns (sale_id, shift_id, register, returned_on, returned_at, staff_id,"
+                        " refund_amount) VALUES (%s,%s,%s,%s,%s,%s,%s)",
+                        (inp.sale_id, shift["shift_id"], inp.register, at.date(), at.replace(tzinfo=None),
+                         inp.employee_id, refund))
+            return_id = cur.lastrowid
+            for product_id in sorted(wanted):
+                cur.execute("INSERT INTO return_lines (return_id, product_id, qty) VALUES (%s,%s,%s)",
+                            (return_id, product_id, wanted[product_id]))
+                cur.execute("UPDATE stock SET on_hand = on_hand + %s WHERE product_id=%s",
+                            (wanted[product_id], product_id))
+            entry_id = add_to_outbox(cur, "refund", {
+                "return_id": return_id, "sale_id": inp.sale_id, "store": store, "date": at.date().isoformat(),
+                "refund_amount": float(refund)})
     deliver(entry_id)
     return {"return_id": return_id, "sale_id": inp.sale_id,
             "lines": [{"product_id": p, "qty": q} for p, q in wanted.items()], "refund_amount": float(refund)}

@@ -113,7 +113,7 @@ class EarnIn(BaseModel):
 
 class TakeBackIn(BaseModel):
     refund_amount: Decimal = Field(ge=0)
-    tier: str = Field(pattern="^(bronze|silver|gold)$")
+    tier: str | None = Field(default=None, pattern="^(bronze|silver|gold)$")  # None: a sale from version 1
     sale_date: date
 
 
@@ -150,10 +150,12 @@ def take_back_points(customer_id: int, inp: TakeBackIn):
         if earlier is not None:
             points = earlier["points"]
         else:
-            points = min(customer["reward_points"], math.floor(inp.refund_amount) * POINTS_PER_CHF[inp.tier])
+            # a sale from version 1 earned 1 point per CHF and has no spend entry, so its return adds none
+            rate = POINTS_PER_CHF[inp.tier] if inp.tier else 1
+            points = min(customer["reward_points"], math.floor(inp.refund_amount) * rate)
             cur.execute("UPDATE customers SET reward_points = reward_points - %s WHERE customer_id=%s",
                         (points, customer_id))
-            entry_id = add_spend(cur, customer_id, inp.sale_date, -money(inp.refund_amount))
+            entry_id = add_spend(cur, customer_id, inp.sale_date, -money(inp.refund_amount)) if inp.tier else None
             finish_step(cur, "take_back_points", {"customer_id": customer_id, "points": points,
                                                   "spend_entry_id": entry_id})
             customer = one(cur, "SELECT * FROM customers WHERE customer_id=%s", customer_id)
@@ -171,7 +173,8 @@ def reverse_take_back(cur, changes) -> None:
     if changes:
         cur.execute("UPDATE customers SET reward_points = reward_points + %s WHERE customer_id=%s",
                     (changes["points"], changes["customer_id"]))
-        cur.execute("DELETE FROM spend_entries WHERE entry_id=%s", (changes["spend_entry_id"],))
+        if changes["spend_entry_id"] is not None:
+            cur.execute("DELETE FROM spend_entries WHERE entry_id=%s", (changes["spend_entry_id"],))
 
 
 install_undo(APP, {"earn_points": reverse_earn, "take_back_points": reverse_take_back})
