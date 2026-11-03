@@ -16,18 +16,23 @@ To be clear about the split: the AI was a tool for drafting, writing code from
 our spec and checking our text. The decisions are ours.
 
 - **Both cuts.** Which services exist in A and B, which data each one owns,
-  the leader pattern, the receipts and undo, the outbox to reporting, and the
-  policy not to prepare for the change requests. We worked these out from the
-  stakeholder quotes, the legacy schema and the lectures (modularity, data
-  decomposition, granularity drivers).
+  the leader pattern, the receipts and undo and the outbox to reporting. We
+  worked these out from the stakeholder quotes, the legacy schema and the
+  lectures (modularity, data decomposition, granularity drivers). The policy
+  not to prepare for the change requests was proposed by the agent and decided
+  by us (see "Design of version 1" below).
 - **The criteria** (`docs/criteria.md`), their weights and the C5 scale. Fixed
   and tagged `criteria-v1` before any variant code.
-- **Code review and findings.** Every entry in [`findings.md`](findings.md) was
-  found by us, by reading the generated code against the design and by our own
-  manual tests (same request id sent twice, upgrade from v1 to v2 without a
-  reset, `docker pause` on customers, stopping services by hand). The agent did
-  not find any of them itself; B5 is the only one it noted, as a decision, and
-  we decided it is a deviation.
+- **Code review and findings.** The code review was done together with the AI:
+  for variant A in a Claude Code session (`b209e564`, see below), for variant B
+  in a claude.ai session that read the code against the design and drafted
+  B1-B5 (and the first version of the B1 fix in `reporting`). We decided what
+  counts as a finding and what is only a difference from the design, reworded
+  the rows (for example A1: the gap is in our design), checked each finding
+  with our own manual tests (same request id sent twice, upgrade from v1 to v2
+  without a reset, `docker pause` on customers, stopping services by hand), and
+  decided which ones get fixed. The agent that generated the code did not
+  report any of them itself; B5 is the only one it noted, as a decision.
 - **Running the tests and measurements.** `make test-*`, `make conformance-*`,
   `make bench-*`, `make blast-*` and `make impact` were run and checked by us,
   and we compared the numbers with our hypotheses ourselves.
@@ -163,13 +168,30 @@ decision not to refine variant B in code after the analysis are ours. While
 checking it, we noticed that the undo of `receive_stock` in till subtracts
 stock without a check, the same kind of gap as A2.
 
-### Report and other docs
+### Report sections 1 and 9, and this file
 
-The analysis, the results table and the recommendation in `docs/report.md` were
-written by us from our own measurements. We used Claude only for small things:
-checking that the wording is clear and consistent with the other docs, and
-spotting where a claim in the text had no evidence linked. It did not choose
-the recommendation or the weights, and it did not produce any of the numbers.
+| Field | Value |
+|-------|-------|
+| Tool | Claude (claude.ai, in a project with the course material, with access to our local assignment folder) |
+| Model and version | Claude Opus 5.5 (`claude-opus-5-5`) |
+| Date(s) | 2026-11-03 |
+| Who drove the session | Bozhidar Chobanov |
+| Input given | `docs/report.md` with sections 2-8 already written, `ai-log/findings.md`, the AI logs, and some of Bozhidar's own messages as an example of his writing |
+| Result | Drafts of report section 1 (recommendation) and section 9 (reflection), and a first draft of this file, which Karlis then extended with his sessions. Committed in `23d825a`. |
+
+**What we asked for (summarised):** write section 1 and section 9 from
+Bozhidar's point of view, short and without technical detail, based on the
+results and the findings we already had; and for this file, summarise where we
+used AI outside the code, without pasting the prompts word for word.
+
+**What we changed or checked:** the recommendation itself (variant B) was
+already decided in sections 5 and 6 before this session; the draft of section 1
+only puts it into a few sentences for management. Section 9 was checked against
+`findings.md`, so that every mistake it mentions is a real finding.
+
+The other report sections (2-8) were drafted in Karlis's session `722fc60e`
+(see "Measuring version 2 and writing the report" above). The numbers come from
+our measurements, and the weights and the choice of variant are ours.
 
 ## What we take from it
 

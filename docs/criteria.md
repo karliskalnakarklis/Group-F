@@ -58,3 +58,4 @@ miss a criterion for team independence, which C2 covers only in part.
 
 | Date | Change | Reason |
 |------|--------|--------|
+| 2026-11-03 | C4: `bench/personal_data.sh` is written after `v2` and run against both the `v1` and `v2` tags, instead of being written before `v1`. The metric, the search terms and the weight stay the same. | The script was not ready when we tagged `v1`, and we did not want to delay the `v1` measurements for it. Running it later against both tags measures exactly the same code, so the result is not affected; only the order of the work changed. |

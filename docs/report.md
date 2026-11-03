@@ -239,7 +239,10 @@ stored data.
 **Changes after `criteria-v1`.** One change, recorded in
 [`criteria.md`](criteria.md): the script for C4 (`bench/personal_data.sh`) is
 written after `v2` and run against both tags, instead of being written
-before `v1`. Reason: *to do*.
+before `v1`. Reason: the script was not ready when we tagged `v1`, and we
+did not want to delay the `v1` measurements for it. Running it later against
+both tags measures exactly the same code, so the result is not affected; only
+the order of the work changed.
 
 ## 5. Decision and trade-offs
 
