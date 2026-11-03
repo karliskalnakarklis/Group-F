@@ -9,8 +9,15 @@ Members: Karlis Kalnakarklis, Bozhidar Chobanov
 
 ## 1. Recommendation
 
-> Three to five sentences for management: which decomposition, for which
-> situation, and the most important price of that choice.
+We recommend variant B, the split by what the business does (selling, purchasing,
+customers, reporting), for Frischwerk. The main reason is simple - in B the tills
+keep selling when the back office or the reporting is down, and in A basically any
+service that goes down stops every till. B is also faster at the till and keeps less
+personal data (no employee records at all). The price is that B keeps some copies
+of data (prices, the sales for the reports, the customer spend), so a change like the
+loyalty programme costs more code (in our case about 50% more lines), and the sales
+report can lag behind for a few seconds while reporting is down. If Frischwerk cares
+more about cheap changes than about tills that keep running, A is the safer choice.
 
 ## 2. Results
 
@@ -343,7 +350,48 @@ make is described in [`domain.md`](domain.md), "What the analysis changed".
 
 ## 9. Reflection on working with the coding agent
 
-> Refer to `ai-log/findings.md`. Which kinds of mistakes did the agent make?
-> Which of them did the tests catch, and which only your review or your
-> measurements? Did the agent respect the variant rules? What would you
-> specify differently next time? What did the agent do well?
+I drove the agent for version 2, and Karlis did version 1.
+All the mistakes we found are in [`findings.md`](../ai-log/findings.md), and how we
+used AI outside of the code is in [`other.md`](../ai-log/other.md).
+
+**What kind of mistakes it made.** Honestly, the code itself was rarely "wrong" in
+the normal sense. Most of the time the agent did exactly what our design said, also
+when the design was wrong. A1, B1 and B2 are the best example - we keyed the undo
+receipts on the request id that the client chooses, and the agent implemented it
+word for word without asking, even though AGENTS.md tells it to ask when something is
+open. The second kind is things it simply left out because nobody asked: the
+migrations from v1 to v2 (A5, B6). And the third kind surprised me and Karlis the most. In B7 it
+kept fewer changed lines (which looks better in `make impact`) and in exchange a slow
+customers service could block till's database connections. So it was kind of
+optimising for our measurement,but for sure not for the store.
+
+**What the tests caught.** None of these. Every finding came from reading the code
+against the design and from our own small tests by hand (sending the same request
+twice, upgrading v1 to v2 without wiping the database, pausing customers). The tests
+were green the whole time, and the agent always reported "41 passed" or "53 passed"
+like that means it is done. That was the biggest lesson from the tests -> that basically green tests only
+mean the contract works on a fresh database, and not that the design is right.
+
+**Did it respect the variant rules?** Yes. Conformance passed in both variants, A kept
+the legacy tables and names, B used the business names from our language table, and
+it did not add extra services. When the design left something open, it mostly wrote
+it down under "Decisions taken by the agent", which made the review for us a lot easier.
+
+**What I would specify differently next time.**
+
+- Ask the agent to list the open questions and the risky spots first, before it
+  writes any code (for example "who chooses this id?", "what happens to an existing
+  database?" and etc...).
+- Write the upgrade from v1 to v2 into the design as a requirement, and not assume it.
+- Say clearly that the number of changed lines does not matter, so it does not try to
+  make the diff look small.
+- Keep the prompts shorter and do one variant per session, so the logs are easier to
+  follow.
+- Keep better track of the AI log.
+
+**What it did well.** It was fast and consistent. Version 1 of both variants passed
+all acceptance tests on the first run, the code looked the same in every service, and
+it kept the docs and the code in sync when we asked for a fix. It also saved us a lot
+of time on the more "boring" parts (compose files, schemas, the call log) which required redundant work. But in the end 
+I would compare to like reviewing the code of a very quick colleague who never asks questions - you
+still have to read everything yourself, and the design decisions stay on you.
