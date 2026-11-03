@@ -10,7 +10,7 @@
 | Undo after a timeout | A service that changes its data on request of another service keeps a receipt of every such change in its own database, in the same transaction. After an error **or a timeout**, the leader also sends the undo for that step. See "Receipts and undo" below. | After a timeout the leader cannot tell whether the change happened. The owner can, from its receipt, so the undo always leaves the data right. |
 | Check and change in one step | A service that owns a value which must not break a rule (stock never below 0, a balance never below 0) checks the rule and changes the value in one transaction with the rows locked. Another service may read the value first, for an early and clear error, but the check at the owner is the one that counts. | A value read by another service can be out of date a moment later. Two tills selling the last item at the same time must not both succeed. |
 | Calls between services | See "Conventions for calls between services" below. | The agent should not have to guess paths, bodies or errors. |
-| Call log | Shared code in `common/` in the variant folder. It logs every incoming request and outgoing call to `/logs/<service>.jsonl` and passes `X-Request-Id` on. | One implementation, the same in every service. |
+| Call log | Shared code in `common/` in the variant folder. It logs every incoming request and outgoing call to `/logs/<service>.jsonl` and passes `X-Request-Id` and `X-Step-Key` on. | One implementation, the same in every service. |
 | Seed data | Each service reads `/shared/seed.json` at start and loads only its own data. | Contract. No seed data in the code. |
 
 ### Receipts and undo
@@ -28,14 +28,24 @@ The rule, the same in both variants, implemented once in `common/`:
 
   | Column | Meaning |
   |--------|---------|
-  | `request_id` | the `X-Request-Id` of the request |
+  | `step_key` | the `X-Step-Key` of the request (see below) |
   | `step` | name of the change, for example `take_stock`, `add_points` |
+  | `request_id` | the `X-Request-Id` of the request, to match the receipt to the call log; not part of the key |
   | `status` | `done` or `undone` |
   | `changes` | JSON: what was changed, for example `[{"product_id": 5, "qty": 2}]` |
   | `created_at` | time of the row |
 
-  The primary key is (`request_id`, `step`), so a step and its undo can never
+  The primary key is (`step_key`, `step`), so a step and its undo can never
   both go through.
+- **The step key:** receipts are not keyed on `X-Request-Id`, because the
+  contract lets the client choose that ID: two different checkouts sent with
+  the same ID would share their receipts, and the second would find its steps
+  "already done" without any change. Instead, the first service that receives
+  a request without the header `X-Step-Key` (the leader, called by the
+  gateway, or background work) creates a new random key (UUID 4) for it. Every
+  call it makes for that request, the undos included, carries this key, and a
+  service that receives `X-Step-Key` uses it. The gateway never sends it, so
+  the client cannot choose it.
 - **Doing a step:** the change and a row with `done` are written in one
   transaction. If a row already exists: `done` means the step was already
   done, so answer as before without changing anything again; `undone` means
@@ -50,7 +60,7 @@ The rule, the same in both variants, implemented once in `common/`:
 - Rows are only needed while a request is running. They may be deleted after
   one day; this assignment needs no cleanup job.
 - `applied_steps` is not data from another service: it records the service's
-  own changes. `request_id` is an ID, not a copy. It is not preparation for
+  own changes. `step_key` and `request_id` are IDs, not copies. It is not preparation for
   the change requests either.
 
 ### Conventions for calls between services
@@ -68,7 +78,14 @@ The rule, the same in both variants, implemented once in `common/`:
   contract, for example `404` `"employee not found"`. When the leader gets
   such an error from another service, it passes the status and `detail` on
   unchanged.
-- Every call carries the `X-Request-Id` of the request.
+- Every call carries the `X-Request-Id` of the request. It is used for the
+  call log and for counting hops, and it is the ID the client chose or the
+  gateway created.
+- Every call between services also carries the `X-Step-Key` of the request,
+  the key of the receipts (see "Receipts and undo"). The gateway does not send
+  it to the leader; the leader creates it. Background work without a request
+  (the ledger retry and the price list refresh in variant B) creates a new
+  key for each call it starts.
 - A call between services that does not answer within 2 s, or cannot
   connect, fails with `503` `"<service> unavailable"`.
 - The gateway waits up to **20 s** for the leader, longer than a leader can
@@ -78,7 +95,7 @@ The rule, the same in both variants, implemented once in `common/`:
   leader cannot be reached, the gateway answers `503` at once.
 - Every service that changes data on request of another service has
   `POST /internal/undo` with the body `{ "step": "<step name>" }`. It undoes
-  that step of the request in `X-Request-Id`, following "Receipts and undo".
+  that step of the request in `X-Step-Key`, following "Receipts and undo".
   It is the same code in every service, in `common/`.
 
 ### Policy for the change requests
@@ -348,8 +365,8 @@ sequenceDiagram
 
 The contract endpoints are served by their leader (see the use case table).
 These are the internal calls between services. They follow "Conventions for
-calls between services": the `X-Request-Id` header on every call, errors as
-`{ "detail" }` passed on unchanged, `503` after 2 s. A call marked with a step
+calls between services": the `X-Request-Id` and `X-Step-Key` headers on every
+call, errors as `{ "detail" }` passed on unchanged, `503` after 2 s. A call marked with a step
 name changes data, writes a receipt in `applied_steps`, and is undone with
 `POST /internal/undo` `{ "step": "<step name>" }`. Calls without a step only
 read data; they need no receipt and no undo. If such a call fails, the leader
@@ -474,7 +491,7 @@ broker, the leader pattern, "Receipts and undo" with `applied_steps`, the
 | till | **Selling at the till**: register shifts and the Z-report, sales, returns and refunds, gift cards, stock on hand, the tax rate | shifts, sales, sale lines, payments, returns, return lines, gift cards, stock on hand, tax rates, ledger outbox, `applied_steps` | **price list** `product_id → unit_price` (source: purchasing; initial load from the seed at start, then pulled from `GET purchasing /internal/price-list` every 60 s; if the pull fails, the last copy stays). **Registers of each store** `register → store` (source: store administration, outside the PoS; loaded from the seed at start; no contract use case changes them). **Staff IDs** (source: HR, outside the PoS; loaded from the seed at start; no contract use case changes them) | `till-db` |
 | purchasing | **Assortment and purchasing**: product master, suppliers, purchase orders, goods receipt | products (name, brand, description, category, subcategory, retail price, cost, supplier; **not** stock), suppliers, purchase orders, order lines | **Staff IDs** (source: HR; loaded from the seed at start) | `purchasing-db` |
 | customers | **Customers and loyalty**: customer profiles, reward points | customers (first and last name, email, phone, street, zip code, city, reward points; no legacy password, no US state), `applied_steps` | none | `customers-db` |
-| reporting | **Sales reporting** for head office and finance | the sales ledger: sale entries with their lines, refund entries; `applied_steps` | **Sale and refund entries** (source: till; delivered by a transactional outbox over HTTP, see "Ledger delivery"). **Store list** (source: store administration; loaded from the seed at start) | `reporting-db` |
+| reporting | **Sales reporting** for head office and finance | the sales ledger: sale entries with their lines, refund entries | **Sale and refund entries** (source: till; delivered by a transactional outbox over HTTP, see "Ledger delivery"). **Store list** (source: store administration; loaded from the seed at start) | `reporting-db` |
 
 ### Components
 
@@ -631,7 +648,7 @@ sequenceDiagram
     T->>CU: earn points (if customer)
     Note right of CU: step earn_points:<br/>404 customer, else points earned
     Note over T: one transaction, rows locked:<br/>shift still open (409 register),<br/>stock and gift cards checked again (409),<br/>sale, lines, payments, stock, gift cards,<br/>ledger outbox row<br/>(if earn or this fails: undo earn_points)
-    T->>R: ledger entry of the sale (step record_sale)
+    T->>R: ledger entry of the sale
     Note right of R: if it fails: stays in the outbox, retried
     T-->>G: 201 sale
     G-->>C: 201 sale
@@ -662,7 +679,7 @@ sequenceDiagram
     G->>T: POST /returns
     Note over T: checks: sale, register, open shift,<br/>employee, lines and quantities
     Note over T: one transaction, rows locked:<br/>shift still open (409 register),<br/>quantities checked again (409 return),<br/>return, lines, stock back, ledger outbox row
-    T->>R: ledger entry of the refund (step record_refund)
+    T->>R: ledger entry of the refund
     Note right of R: if it fails: stays in the outbox, retried
     T-->>G: 201 return
     G-->>C: 201 return
@@ -711,8 +728,8 @@ sequenceDiagram
 
 The contract endpoints are served by their leader (see the use case table).
 These are the internal calls between services. They follow "Conventions for
-calls between services": the `X-Request-Id` header on every call, errors as
-`{ "detail" }` passed on unchanged, `503 "<service> unavailable"` after 2 s or
+calls between services": the `X-Request-Id` and `X-Step-Key` headers on every
+call, errors as `{ "detail" }` passed on unchanged, `503 "<service> unavailable"` after 2 s or
 when the service cannot be reached. A call marked with a step name changes
 data, writes a receipt in `applied_steps`, and is undone with
 `POST /internal/undo` `{ "step": "<step name>" }`.
@@ -746,14 +763,14 @@ answers no personal data.
 
 | Call | Request | Answer | Errors | Step | Used by |
 |------|---------|--------|--------|------|---------|
-| `POST /internal/ledger/sales` | `{ sale_id, store, date, total, tax, lines: [ { product_id, qty } ] }` | `200` `{ sale_id }` | none | `record_sale` | till (after a checkout, and the outbox retry) |
-| `POST /internal/ledger/refunds` | `{ return_id, sale_id, store, date, refund_amount }` | `200` `{ return_id }` | none | `record_refund` | till (after a return, and the outbox retry) |
-| `POST /internal/undo` | `{ step }` | `200` | none | shared | nobody (ledger entries are never undone) |
+| `POST /internal/ledger/sales` | `{ sale_id, store, date, total, tax, lines: [ { product_id, qty } ] }` | `200` `{ sale_id }` | none | none (idempotent by `sale_id`) | till (after a checkout, and the outbox retry) |
+| `POST /internal/ledger/refunds` | `{ return_id, sale_id, store, date, refund_amount }` | `200` `{ return_id }` | none | none (idempotent by `return_id`) | till (after a return, and the outbox retry) |
 
-A repeated delivery with the same `X-Request-Id` finds the receipt `done` and
-answers as before without writing again (idempotent). `/internal/undo` exists
-because the code in `common/` is the same for every writer; till never calls
-it on reporting.
+A repeated delivery of the same `sale_id` or `return_id` answers as before
+without writing again (idempotent). The entries are keyed on the business ID,
+not on `X-Request-Id`: the client chooses that ID and may send the same one
+for two different sales (see `ai-log/findings.md`, B1). Ledger entries are
+never undone, so reporting keeps no receipts and has no `/internal/undo`.
 
 **purchasing**
 
@@ -761,8 +778,8 @@ it on reporting.
 |------|---------|--------|--------|------|---------|
 | `GET /internal/price-list` | none | `200` `[ { product_id, unit_price } ]` | none | none (read only) | till (refresh every 60 s) |
 
-`applied_steps` exists in `till-db`, `customers-db` and `reporting-db`: the
-services that change data on request of another service.
+`applied_steps` exists in `till-db` and `customers-db`: the services whose
+changes on request of another service can be undone.
 
 ### Ledger delivery to reporting
 
@@ -775,17 +792,17 @@ A transactional outbox over HTTP, without a broker:
   store of the register of the sale or return; `date` is its date in
   Europe/Zurich.
 - Right after the commit, till posts the row to
-  `POST reporting /internal/ledger/sales` (step `record_sale`) or
-  `/internal/ledger/refunds` (step `record_refund`), with a 2 s timeout and the
+  `POST reporting /internal/ledger/sales` or
+  `/internal/ledger/refunds`, with a 2 s timeout and the
   original `X-Request-Id`, and marks it delivered on `200`. A failure never
   fails the sale or return: the client still gets its `201`.
 - A background task in till sends the undelivered rows every 2 s, oldest
   first, with their original `X-Request-Id`; it stops at the first failure and
-  tries again in the next round. If a row is delivered twice, the receipt
-  makes the second delivery harmless.
-- Reporting records every entry together with its `applied_steps` receipt in
-  one transaction, so a repeated delivery answers as before and changes
-  nothing.
+  tries again in the next round. If a row is delivered twice, the second
+  delivery changes nothing (idempotent by `sale_id` / `return_id`).
+- Reporting inserts an entry only if no entry with that `sale_id` or
+  `return_id` exists (`INSERT IGNORE` on the primary key), so a repeated
+  delivery answers as before and changes nothing.
 - Ledger entries are never undone: they are only sent after the sale or
   return is final.
 - The number of undelivered rows in the outbox is the visible size of the gap
@@ -862,8 +879,7 @@ undone in reverse order.
   receipts of the same order at the same time: both add stock, one wins the
   lock, the other undoes its `receive_stock` and answers `409 received`.
 - **Receipts:** `applied_steps` in `till-db` (`receive_stock`),
-  `customers-db` (`earn_points`) and `reporting-db` (`record_sale`,
-  `record_refund`), following "Receipts and undo" in the common decisions. An
+  `customers-db` (`earn_points`), following "Receipts and undo" in the common decisions. An
   undo after a timeout follows the same rule as after an error.
 
 ### Failure behaviour
@@ -974,5 +990,6 @@ Decisions the design left open, taken while implementing. Please review.
 - **Customers:** `zip_code` is accepted as a number or a string and stored
   as a string; `phone` is stored as given. From the seed, the legacy phone
   number (a double) is stored as its digits.
-- **Undo in reporting** deletes the entry of the step. Till never calls it;
-  it exists because the undo code is the same for every writer.
+- ~~**Undo in reporting** deletes the entry of the step.~~ Removed in review
+  (`ai-log/findings.md`, B1): reporting keys ledger entries on `sale_id` /
+  `return_id` and has no receipts and no undo.

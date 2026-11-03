@@ -9,8 +9,7 @@ from fastapi import Query
 from pydantic import BaseModel, Field
 
 from common.calllog import create_app
-from common.db import (APPLIED_STEPS, finish_step, init_database, install_undo, money, one, require, start_step,
-                       transaction)
+from common.db import init_database, money, one, require, transaction
 
 APP = create_app("reporting")
 
@@ -32,7 +31,7 @@ CREATE TABLE IF NOT EXISTS refund_entries (
   refund_amount decimal(12,2) NOT NULL,
   KEY store_day (store_id, refunded_on)
 );
-""" + APPLIED_STEPS
+"""
 
 
 def fill(cur, seed: dict) -> None:
@@ -72,43 +71,32 @@ class RefundEntryIn(BaseModel):
 
 @APP.post("/internal/ledger/sales")
 def record_sale(inp: SaleEntryIn):
-    """Step record_sale. A repeated delivery answers as before."""
+    """Record a sale entry. Idempotent by sale_id: a repeated delivery of the
+    same sale changes nothing. Not keyed on X-Request-Id, because the client
+    chooses that id and may send the same one for two different sales
+    (ai-log/findings.md, B1)."""
     with transaction() as cur:
-        if start_step(cur, "record_sale") is None:
-            cur.execute("INSERT INTO sale_entries (sale_id, store_id, sold_on, total, tax) VALUES (%s,%s,%s,%s,%s)",
-                        (inp.sale_id, inp.store, inp.date, money(inp.total), money(inp.tax)))
+        cur.execute("INSERT IGNORE INTO sale_entries (sale_id, store_id, sold_on, total, tax) VALUES (%s,%s,%s,%s,%s)",
+                    (inp.sale_id, inp.store, inp.date, money(inp.total), money(inp.tax)))
+        if cur.rowcount == 1:  # first delivery of this sale
             for n, line in enumerate(inp.lines, start=1):
                 cur.execute("INSERT INTO sale_entry_lines (sale_id, line_no, product_id, qty) VALUES (%s,%s,%s,%s)",
                             (inp.sale_id, n, line.product_id, line.qty))
-            finish_step(cur, "record_sale", {"sale_id": inp.sale_id})
     return {"sale_id": inp.sale_id}
 
 
 @APP.post("/internal/ledger/refunds")
 def record_refund(inp: RefundEntryIn):
-    """Step record_refund. A repeated delivery answers as before."""
+    """Record a refund entry. Idempotent by return_id, for the same reason."""
     with transaction() as cur:
-        if start_step(cur, "record_refund") is None:
-            cur.execute("INSERT INTO refund_entries (return_id, sale_id, store_id, refunded_on, refund_amount)"
-                        " VALUES (%s,%s,%s,%s,%s)",
-                        (inp.return_id, inp.sale_id, inp.store, inp.date, money(inp.refund_amount)))
-            finish_step(cur, "record_refund", {"return_id": inp.return_id})
+        cur.execute("INSERT IGNORE INTO refund_entries (return_id, sale_id, store_id, refunded_on, refund_amount)"
+                    " VALUES (%s,%s,%s,%s,%s)",
+                    (inp.return_id, inp.sale_id, inp.store, inp.date, money(inp.refund_amount)))
     return {"return_id": inp.return_id}
 
 
-def remove_sale(cur, changes) -> None:
-    if changes:
-        cur.execute("DELETE FROM sale_entry_lines WHERE sale_id=%s", (changes["sale_id"],))
-        cur.execute("DELETE FROM sale_entries WHERE sale_id=%s", (changes["sale_id"],))
-
-
-def remove_refund(cur, changes) -> None:
-    if changes:
-        cur.execute("DELETE FROM refund_entries WHERE return_id=%s", (changes["return_id"],))
-
-
-# Shared code: every writer has the undo. Till never undoes a ledger entry.
-install_undo(APP, {"record_sale": remove_sale, "record_refund": remove_refund})
+# Ledger entries are final when till sends them and are never undone, so
+# reporting keeps no receipts (applied_steps) and has no /internal/undo.
 
 
 # --- sales report ------------------------------------------------------------------

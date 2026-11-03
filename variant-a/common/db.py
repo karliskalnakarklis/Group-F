@@ -12,7 +12,7 @@ import pymysql
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
-from common.calllog import log, now, request_id
+from common.calllog import log, now, request_id, step_key
 
 DB = dict(host=os.getenv("DB_HOST", "db"), user=os.getenv("DB_USER", "pos"),
           password=os.getenv("DB_PASSWORD", "pos"), database=os.getenv("DB_NAME", "pos"),
@@ -87,9 +87,9 @@ def insert_rows(cur, table: str, rows: list[dict]) -> None:
 
 APPLIED_STEPS = """
 CREATE TABLE IF NOT EXISTS applied_steps (
-  request_id varchar(100) NOT NULL, step varchar(50) NOT NULL,
+  step_key varchar(100) NOT NULL, step varchar(50) NOT NULL, request_id varchar(100) NOT NULL,
   status varchar(10) NOT NULL, changes text NOT NULL, created_at datetime NOT NULL,
-  PRIMARY KEY (request_id, step)
+  PRIMARY KEY (step_key, step)
 )"""
 
 
@@ -99,12 +99,12 @@ def start_step(cur, step: str):
     earlier changes for a step that is already done (answer as before, change
     nothing); 409 if the request was already cancelled."""
     try:
-        cur.execute("INSERT INTO applied_steps (request_id, step, status, changes, created_at)"
-                    " VALUES (%s,%s,'done','[]',%s)", (request_id(), step, now().replace(tzinfo=None)))
+        cur.execute("INSERT INTO applied_steps (step_key, step, request_id, status, changes, created_at)"
+                    " VALUES (%s,%s,%s,'done','[]',%s)", (step_key(), step, request_id(), now().replace(tzinfo=None)))
         return None
     except pymysql.err.IntegrityError:
-        row = one(cur, "SELECT * FROM applied_steps WHERE request_id=%s AND step=%s FOR UPDATE",
-                  request_id(), step)
+        row = one(cur, "SELECT * FROM applied_steps WHERE step_key=%s AND step=%s FOR UPDATE",
+                  step_key(), step)
         if row["status"] == "done":
             return json.loads(row["changes"])
         raise fail(409, f"step {step} of this request was cancelled") from None
@@ -112,8 +112,8 @@ def start_step(cur, step: str):
 
 def finish_step(cur, step: str, changes) -> None:
     """Record what the step changed, in the same transaction as the change."""
-    cur.execute("UPDATE applied_steps SET changes=%s WHERE request_id=%s AND step=%s",
-                (json.dumps(changes), request_id(), step))
+    cur.execute("UPDATE applied_steps SET changes=%s WHERE step_key=%s AND step=%s",
+                (json.dumps(changes), step_key(), step))
 
 
 class UndoIn(BaseModel):
@@ -121,7 +121,7 @@ class UndoIn(BaseModel):
 
 
 def install_undo(app: FastAPI, reverse: dict[str, Callable[[object, object], None]]) -> None:
-    """POST /internal/undo {step}: undo that step of the request in X-Request-Id.
+    """POST /internal/undo {step}: undo that step of the request in X-Step-Key.
     'reverse' maps a step name to a function that reverses its changes."""
 
     @app.post("/internal/undo")
@@ -132,18 +132,18 @@ def install_undo(app: FastAPI, reverse: dict[str, Callable[[object, object], Non
             try:
                 with transaction() as cur:
                     try:
-                        cur.execute("INSERT INTO applied_steps (request_id, step, status, changes, created_at)"
-                                    " VALUES (%s,%s,'undone','[]',%s)",
-                                    (request_id(), inp.step, now().replace(tzinfo=None)))
+                        cur.execute("INSERT INTO applied_steps (step_key, step, request_id, status, changes,"
+                                    " created_at) VALUES (%s,%s,%s,'undone','[]',%s)",
+                                    (step_key(), inp.step, request_id(), now().replace(tzinfo=None)))
                         return {"step": inp.step, "status": "undone"}  # never arrived: refuse it later
                     except pymysql.err.IntegrityError:
                         pass
-                    row = one(cur, "SELECT * FROM applied_steps WHERE request_id=%s AND step=%s FOR UPDATE",
-                              request_id(), inp.step)
+                    row = one(cur, "SELECT * FROM applied_steps WHERE step_key=%s AND step=%s FOR UPDATE",
+                              step_key(), inp.step)
                     if row["status"] == "done":
                         reverse[inp.step](cur, json.loads(row["changes"]))
-                        cur.execute("UPDATE applied_steps SET status='undone' WHERE request_id=%s AND step=%s",
-                                    (request_id(), inp.step))
+                        cur.execute("UPDATE applied_steps SET status='undone' WHERE step_key=%s AND step=%s",
+                                    (step_key(), inp.step))
                     return {"step": inp.step, "status": "undone"}
             except pymysql.err.OperationalError as error:  # deadlock with the step itself: try again
                 log.warning("undo of %s, attempt %s: %s", inp.step, attempt + 1, error)

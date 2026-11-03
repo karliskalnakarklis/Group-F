@@ -13,7 +13,7 @@ from decimal import Decimal
 from fastapi import HTTPException
 from pydantic import BaseModel, Field
 
-from common.calllog import REQUEST_ID, Steps, call, call_ok, create_app, log, now
+from common.calllog import REQUEST_ID, STEP_KEY, Steps, call, call_ok, create_app, log, now
 from common.db import (APPLIED_STEPS, fail, finish_step, init_database, install_undo, money, one, require,
                        start_step, transaction)
 
@@ -471,19 +471,21 @@ def add_to_outbox(cur, kind: str, payload: dict) -> int:
 
 
 def deliver(entry_id: int) -> bool:
-    """Send one outbox row to reporting with its original X-Request-Id; mark it
-    delivered on 200. A failure never fails the sale or return."""
+    """Send one outbox row to reporting with its original X-Request-Id and a new
+    X-Step-Key; mark it delivered on 200. A failure never fails the sale or return."""
     try:
         with transaction() as cur:
             row = one(cur, "SELECT * FROM ledger_outbox WHERE entry_id=%s", entry_id)
         if row is None or row["delivered_at"] is not None:
             return True
         token = REQUEST_ID.set(row["request_id"])
+        key_token = STEP_KEY.set(uuid.uuid4().hex)
         try:
             response = call("reporting", "POST", LEDGER_PATHS[row["kind"]], json_body=json.loads(row["payload"]))
         except HTTPException:
             return False
         finally:
+            STEP_KEY.reset(key_token)
             REQUEST_ID.reset(token)
         if response.status_code != 200:
             log.warning("ledger entry %s refused: %s %s", entry_id, response.status_code, response.text)
@@ -518,6 +520,7 @@ def deliver_outbox_forever() -> None:
 
 def refresh_price_list() -> None:
     REQUEST_ID.set(uuid.uuid4().hex)
+    STEP_KEY.set(uuid.uuid4().hex)
     prices = call_ok("purchasing", "GET", "/internal/price-list")
     with transaction() as cur:
         for p in prices:

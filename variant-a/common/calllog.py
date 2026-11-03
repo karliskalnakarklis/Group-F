@@ -2,7 +2,8 @@
 docs/design.md "Conventions for calls between services").
 
 Every service builds its app with create_app(). The middleware logs every
-incoming request; call() logs every outgoing call and passes X-Request-Id on."""
+incoming request; call() logs every outgoing call and passes X-Request-Id and
+X-Step-Key on."""
 import contextvars
 import json
 import logging
@@ -23,6 +24,7 @@ ZURICH = ZoneInfo("Europe/Zurich")
 LOG_DIR = Path(os.getenv("CALL_LOG_DIR", "/logs"))
 CALL_TIMEOUT = float(os.getenv("CALL_TIMEOUT", "2"))
 REQUEST_ID: contextvars.ContextVar[str] = contextvars.ContextVar("request_id", default="")
+STEP_KEY: contextvars.ContextVar[str] = contextvars.ContextVar("step_key", default="")
 
 log = logging.getLogger(SERVICE)
 _write_lock = threading.Lock()
@@ -39,6 +41,16 @@ def request_id() -> str:
         rid = uuid.uuid4().hex
         REQUEST_ID.set(rid)
     return rid
+
+
+def step_key() -> str:
+    """Key of the receipts (applied_steps) of this request. Unlike X-Request-Id,
+    the client cannot choose it: the first service without X-Step-Key creates it."""
+    key = STEP_KEY.get()
+    if not key:  # background work outside a request
+        key = uuid.uuid4().hex
+        STEP_KEY.set(key)
+    return key
 
 
 def write_log(direction: str, method: str, target: str, path: str, status: int | None, started: float,
@@ -60,6 +72,7 @@ def create_app(title: str) -> FastAPI:
     async def call_log(request: Request, call_next):
         rid = request.headers.get("X-Request-Id") or uuid.uuid4().hex
         token = REQUEST_ID.set(rid)
+        key_token = STEP_KEY.set(request.headers.get("X-Step-Key") or uuid.uuid4().hex)
         started = time.perf_counter()
         try:
             response = await call_next(request)
@@ -67,6 +80,7 @@ def create_app(title: str) -> FastAPI:
             log.exception("unhandled error")
             response = JSONResponse({"detail": "internal error"}, status_code=500)
         finally:
+            STEP_KEY.reset(key_token)
             REQUEST_ID.reset(token)
         write_log("in", request.method, SERVICE, request.url.path, response.status_code, started, rid)
         response.headers["X-Request-Id"] = rid
@@ -89,7 +103,8 @@ def call(target: str, method: str, path: str, *, json_body=None, params=None,
     status = None
     try:
         response = _client.request(method, f"http://{target}:8000{path}", json=json_body, params=params,
-                                   headers={"X-Request-Id": request_id()}, timeout=timeout or CALL_TIMEOUT)
+                                   headers={"X-Request-Id": request_id(), "X-Step-Key": step_key()},
+                                   timeout=timeout or CALL_TIMEOUT)
         status = response.status_code
         return response
     except httpx.HTTPError:
