@@ -1,8 +1,9 @@
 """sales (variant A): sales, returns, gift cards, the tax rate and the sales report.
 Owns ticket_system, cart_inprogress, item_list, ticket_gift_payment,
 return_table, return_items, gift_card and tax_table in sales-db."""
+import math
 import uuid
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 
 from fastapi import Query
@@ -33,7 +34,8 @@ CREATE TABLE IF NOT EXISTS ticket_system (
   customer_id int DEFAULT NULL, employee_id int NOT NULL,
   register_id int NOT NULL,
   reward_points int NOT NULL DEFAULT 0,
-  KEY register_id (register_id)
+  tier varchar(10) DEFAULT NULL, points_rate int NOT NULL DEFAULT 0,
+  KEY register_id (register_id), KEY customer_id (customer_id)
 );
 CREATE TABLE IF NOT EXISTS cart_inprogress (
   CID int NOT NULL AUTO_INCREMENT PRIMARY KEY,
@@ -43,7 +45,7 @@ CREATE TABLE IF NOT EXISTS cart_inprogress (
 CREATE TABLE IF NOT EXISTS item_list (
   ITID int NOT NULL AUTO_INCREMENT PRIMARY KEY,
   CID int NOT NULL, qty int NOT NULL, product_id int NOT NULL,
-  unit_price float NOT NULL,
+  unit_price float NOT NULL, vat_rate decimal(6,4) NOT NULL DEFAULT 0,
   KEY CID (CID)
 );
 CREATE TABLE IF NOT EXISTS ticket_gift_payment (
@@ -61,12 +63,29 @@ CREATE TABLE IF NOT EXISTS return_items (
   RTID int NOT NULL, product_id int NOT NULL, qty int NOT NULL,
   KEY RTID (RTID)
 );
+CREATE TABLE IF NOT EXISTS vat_table (
+  vat_code varchar(10) NOT NULL PRIMARY KEY, vat_rate decimal(6,4) NOT NULL
+);
+CREATE TABLE IF NOT EXISTS vat_category (
+  productType varchar(50) NOT NULL PRIMARY KEY, vat_code varchar(10) NOT NULL
+);
+CREATE TABLE IF NOT EXISTS ticket_vat (
+  ticket_id int NOT NULL, vat_rate decimal(6,4) NOT NULL,
+  net decimal(12,2) NOT NULL, vat decimal(12,2) NOT NULL, gross decimal(12,2) NOT NULL,
+  PRIMARY KEY (ticket_id, vat_rate)
+);
 """
+# CR1: VAT rates and reduced categories, from the change request (not in the seed).
+VAT_RATES = {"reduced": "0.026", "standard": "0.081"}
+REDUCED = ("Dairy", "Produce", "Beef", "Poultry", "Pasta", "DryGoods", "PetFood")
+POINTS_PER_CHF = {"bronze": 1, "silver": 2, "gold": 3}  # CR2
 
 
 def fill(cur, seed: dict) -> None:
     insert_rows(cur, "gift_card", seed["gift_card"])
     insert_rows(cur, "tax_table", seed["tax_table"])
+    insert_rows(cur, "vat_table", [{"vat_code": c, "vat_rate": r} for c, r in VAT_RATES.items()])
+    insert_rows(cur, "vat_category", [{"productType": t, "vat_code": "reduced"} for t in REDUCED])
 
 
 @APP.on_event("startup")
@@ -77,6 +96,51 @@ def startup():
 def tax_rate(cur) -> Decimal:
     row = one(cur, "SELECT tax_rate FROM tax_table ORDER BY tax_year DESC LIMIT 1")
     return Decimal(str(row["tax_rate"]))
+
+
+def vat_rate_of(cur, product_type: str) -> Decimal:
+    """CR1: the rate of the category; a category not in vat_category is standard."""
+    row = one(cur, "SELECT vat_rate FROM vat_table WHERE vat_code ="
+                   " COALESCE((SELECT vat_code FROM vat_category WHERE productType=%s), 'standard')", product_type)
+    return Decimal(str(row["vat_rate"])).normalize()
+
+
+def vat_per_rate(lines: list, prices: dict[int, Decimal], rates: dict[int, Decimal]) -> list[dict]:
+    """CR1, per rate: gross = sum of the line totals, vat = gross x rate / (1 + rate)
+    rounded half up, net = gross - vat. Lowest rate first."""
+    gross: dict[Decimal, Decimal] = {}
+    for line in lines:
+        rate = rates[line.product_id]
+        gross[rate] = gross.get(rate, Decimal(0)) + line.qty * prices[line.product_id]
+    entries = []
+    for rate in sorted(gross):
+        g = money(gross[rate])
+        v = money(g * rate / (1 + rate))
+        entries.append({"rate": rate, "net": g - v, "vat": v, "gross": g})
+    return entries
+
+
+def vat_body(rows) -> list[dict]:
+    return [{"rate": float(r["vat_rate"]), "net": float(money(r["net"])), "vat": float(money(r["vat"])),
+             "gross": float(money(r["gross"]))} for r in rows]
+
+
+def spend_12m(cur, customer_id: int, today: date) -> Decimal:
+    """CR2: totals of the customer's sales dated in [today - 364 days, today],
+    minus the refunds of the returns of those sales."""
+    since = today - timedelta(days=364)
+    sold = one(cur, "SELECT COALESCE(SUM(total),0) AS s FROM ticket_system"
+                    " WHERE customer_id=%s AND date BETWEEN %s AND %s", customer_id, since, today)["s"]
+    refunded = one(cur, "SELECT COALESCE(SUM(r.refunds),0) AS r FROM return_table r"
+                        " JOIN ticket_system t ON t.ticket_id = r.ticket_id"
+                        " WHERE t.customer_id=%s AND t.date BETWEEN %s AND %s", customer_id, since, today)["r"]
+    return money(sold) - money(refunded)
+
+
+def tier_of(spend: Decimal) -> str:
+    if spend >= 2000:
+        return "gold"
+    return "silver" if spend >= 500 else "bronze"
 
 
 class Line(BaseModel):
@@ -153,12 +217,14 @@ def sale_body(cur, ticket_id: int, register: int | None = None) -> dict:
     cur.execute("SELECT gift_id, amount FROM ticket_gift_payment WHERE ticket_id=%s", (ticket_id,))
     payments += [{"method": "gift_card", "gift_card_id": g["gift_id"], "amount": float(money(g["amount"]))}
                  for g in cur.fetchall()]
+    cur.execute("SELECT vat_rate, net, vat, gross FROM ticket_vat WHERE ticket_id=%s ORDER BY vat_rate", (ticket_id,))
+    vat = vat_body(cur.fetchall())
     if register is None:
         register = call_ok("stores", "GET", f"/internal/sessions/{t['register_id']}")["register"]
     return {"sale_id": ticket_id, "register": register, "date": t["date"].isoformat(),
             "customer_id": t["customer_id"], "lines": lines, "subtotal": float(money(t["subtotal"])),
             "tax": float(money(t["tax"])), "total": float(money(t["total"])),
-            "reward_points_earned": t["reward_points"], "payments": payments}
+            "reward_points_earned": t["reward_points"], "payments": payments, "vat": vat, "tier": t["tier"]}
 
 
 def gift_card_sums(payments: list[Payment]) -> dict[int, Decimal]:
@@ -194,12 +260,13 @@ def create_sale(inp: SaleIn):
         if products[product_id]["in_stock"] < qty:
             raise fail(409, f"not enough stock for product {product_id}")
 
-    subtotal = money(sum((line.qty * money(products[line.product_id]["unit_price"]) for line in inp.lines),
-                         Decimal(0)))
+    prices = {p: money(products[p]["unit_price"]) for p in wanted}
     with transaction() as cur:
-        rate = tax_rate(cur)
-    tax = money(subtotal * rate)
-    total = subtotal + tax
+        rates = {p: vat_rate_of(cur, products[p]["category"]) for p in wanted}
+    vat = vat_per_rate(inp.lines, prices, rates)
+    total = sum((e["gross"] for e in vat), Decimal(0))
+    tax = sum((e["vat"] for e in vat), Decimal(0))
+    subtotal = total - tax
     paid = sum((money(p.amount) for p in inp.payments), Decimal(0))
     if paid != total:
         raise fail(422, f"payments add up to {paid}, but the total is {total}")
@@ -207,7 +274,12 @@ def create_sale(inp: SaleIn):
     with transaction() as cur:
         check_gift_cards(cur, gift_sums, lock=False)
 
-    points = int(total) if inp.customer_id is not None else 0
+    points, tier, points_rate = 0, None, 0
+    if inp.customer_id is not None:  # CR2: tier from the spend before this sale
+        with transaction() as cur:
+            tier = tier_of(spend_12m(cur, inp.customer_id, now().date()))
+        points_rate = POINTS_PER_CHF[tier]
+        points = math.floor(total) * points_rate
     lines = [{"product_id": p, "qty": q} for p, q in wanted.items()]
     with Steps() as steps:
         steps.run("inventory", "take_stock", "/internal/stock/take", {"lines": lines})
@@ -220,18 +292,22 @@ def create_sale(inp: SaleIn):
             cash = sum((money(p.amount) for p in inp.payments if p.method == "cash"), Decimal(0))
             card = sum((money(p.amount) for p in inp.payments if p.method == "card"), Decimal(0))
             cur.execute("INSERT INTO ticket_system (date, company_name, time, quantity, subtotal, total, cost, tax,"
-                        " tax_rate, cash, credit, cart_purchase, customer_id, employee_id, register_id, reward_points)"
-                        " VALUES (%s,'Frischwerk',%s,%s,%s,%s,%s,%s,%s,%s,%s,0,%s,%s,%s,%s)",
+                        " tax_rate, cash, credit, cart_purchase, customer_id, employee_id, register_id, reward_points,"
+                        " tier, points_rate) VALUES (%s,'Frischwerk',%s,%s,%s,%s,%s,%s,0,%s,%s,0,%s,%s,%s,%s,%s,%s)",
                         (at.date(), at.time(), sum(wanted.values()), float(subtotal), float(total), float(cost),
-                         float(tax), float(rate), float(cash), float(card), inp.customer_id, inp.employee_id,
-                         session_id, points))
+                         float(tax), float(cash), float(card), inp.customer_id, inp.employee_id,
+                         session_id, points, tier, points_rate))
             ticket_id = cur.lastrowid
             cur.execute("INSERT INTO cart_inprogress (customer_id, ticket_id) VALUES (%s,%s)",
                         (inp.customer_id, ticket_id))
             cid = cur.lastrowid
             for line in inp.lines:
-                cur.execute("INSERT INTO item_list (CID, qty, product_id, unit_price) VALUES (%s,%s,%s,%s)",
-                            (cid, line.qty, line.product_id, float(money(products[line.product_id]["unit_price"]))))
+                cur.execute("INSERT INTO item_list (CID, qty, product_id, unit_price, vat_rate)"
+                            " VALUES (%s,%s,%s,%s,%s)",
+                            (cid, line.qty, line.product_id, float(prices[line.product_id]), rates[line.product_id]))
+            for e in vat:
+                cur.execute("INSERT INTO ticket_vat (ticket_id, vat_rate, net, vat, gross) VALUES (%s,%s,%s,%s,%s)",
+                            (ticket_id, e["rate"], e["net"], e["vat"], e["gross"]))
             for p in inp.payments:
                 if p.method == "gift_card":
                     cur.execute("UPDATE gift_card SET card_balance = card_balance - %s, ticket_id=%s WHERE gift_id=%s",
@@ -258,7 +334,7 @@ class ReturnIn(BaseModel):
 
 def check_return(cur, sale_id: int, wanted: dict[int, int]) -> Decimal:
     """Lines are in the sale and not more than sold minus already returned
-    (409 return). Answers the net amount of the returned lines."""
+    (409 return). Answers the gross amount of the returned lines (CR1)."""
     cid = one(cur, "SELECT CID FROM cart_inprogress WHERE ticket_id=%s", sale_id)["CID"]
     cur.execute("SELECT product_id, SUM(qty) AS qty, MAX(unit_price) AS unit_price FROM item_list"
                 " WHERE CID=%s GROUP BY product_id", (cid,))
@@ -279,19 +355,22 @@ def check_return(cur, sale_id: int, wanted: dict[int, int]) -> Decimal:
 @APP.post("/returns", status_code=201)
 def create_return(inp: ReturnIn):
     with transaction() as cur:
-        require(cur, "sale", "SELECT ticket_id FROM ticket_system WHERE ticket_id=%s", inp.sale_id)
+        ticket = require(cur, "sale", "SELECT * FROM ticket_system WHERE ticket_id=%s", inp.sale_id)
     session_id = open_session(inp.register)
     check_employee(inp.employee_id)
     wanted = added_up(inp.lines)
     with transaction() as cur:
-        check_return(cur, inp.sale_id, wanted)
+        refund = money(check_return(cur, inp.sale_id, wanted))
     lines = [{"product_id": p, "qty": q} for p, q in wanted.items()]
     with Steps() as steps:
         steps.run("inventory", "give_stock_back", "/internal/stock/give-back", {"lines": lines})
+        if ticket["customer_id"] is not None:  # CR2: at the points rate of the sale
+            steps.run("people", "take_back_points", f"/internal/customers/{ticket['customer_id']}/points/take-back",
+                      {"points": math.floor(refund) * ticket["points_rate"]})
         with transaction() as cur:
             ticket = one(cur, "SELECT * FROM ticket_system WHERE ticket_id=%s FOR UPDATE", inp.sale_id)
             net = check_return(cur, inp.sale_id, wanted)  # checked again, sale locked
-            refund = money(net) + money(net * Decimal(str(ticket["tax_rate"])))
+            refund = money(net)
             at = now()
             cur.execute("INSERT INTO return_table (ticket_id, date, time, refunds, exchanges, register_id)"
                         " VALUES (%s,%s,%s,%s,0,%s)", (inp.sale_id, at.date(), at.time(), float(refund), session_id))
@@ -320,10 +399,22 @@ def sales_report(store: int, to: date, from_: date = Query(alias="from")):
                     f" WHERE t.register_id IN ({marks}) AND t.date BETWEEN %s AND %s"
                     " GROUP BY i.product_id ORDER BY qty DESC, i.product_id LIMIT 5", (*session_ids, from_, to))
         top = [{"product_id": r["product_id"], "qty": int(r["qty"])} for r in cur.fetchall()]
+        vat = session_vat(cur, session_ids, from_, to)
     gross, refunds = money(sales["gross"]), money(refunds)
     return {"store": store, "from": from_.isoformat(), "to": to.isoformat(), "sales_count": sales["n"],
             "gross_total": float(gross), "tax_total": float(money(sales["tax"])),
-            "refunds_total": float(refunds), "net_revenue": float(gross - refunds), "top_products": top}
+            "refunds_total": float(refunds), "net_revenue": float(gross - refunds), "top_products": top,
+            "vat": vat}
+
+
+def session_vat(cur, session_ids: list[int], from_: date | None = None, to: date | None = None) -> list[dict]:
+    """CR1: the stored VAT per rate of the sales of these sessions (in the date range), summed per rate."""
+    marks = ",".join(["%s"] * len(session_ids))
+    dates = " AND t.date BETWEEN %s AND %s" if from_ is not None else ""
+    cur.execute("SELECT v.vat_rate, SUM(v.net) AS net, SUM(v.vat) AS vat, SUM(v.gross) AS gross FROM ticket_vat v"
+                f" JOIN ticket_system t ON t.ticket_id = v.ticket_id WHERE t.register_id IN ({marks}){dates}"
+                " GROUP BY v.vat_rate ORDER BY v.vat_rate", (*session_ids, *((from_, to) if dates else ())))
+    return vat_body(cur.fetchall())
 
 
 # --- internal calls ------------------------------------------------------------------
@@ -335,6 +426,15 @@ def session_totals(session_id: int):
                          " COALESCE(SUM(cash),0) AS cash FROM ticket_system WHERE register_id=%s", session_id)
         refunds = one(cur, "SELECT COALESCE(SUM(refunds),0) AS r FROM return_table WHERE register_id=%s",
                       session_id)["r"]
+        vat = session_vat(cur, [session_id])
     return {"session_id": session_id, "sales_count": sales["n"], "gross_total": float(money(sales["gross"])),
             "tax_total": float(money(sales["tax"])), "cash_sales": float(money(sales["cash"])),
-            "refunds_total": float(money(refunds))}
+            "refunds_total": float(money(refunds)), "vat": vat}
+
+
+@APP.get("/internal/customers/{customer_id}/spend")
+def customer_spend(customer_id: int):
+    """CR2: spend of the last 365 days and the tier, for people (look up a customer)."""
+    with transaction() as cur:
+        spend = spend_12m(cur, customer_id, now().date())
+    return {"customer_id": customer_id, "spend_12m": float(spend), "tier": tier_of(spend)}

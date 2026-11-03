@@ -2,7 +2,7 @@
 Owns customer_info and employee_info in people-db."""
 from pydantic import BaseModel, Field
 
-from common.calllog import create_app
+from common.calllog import call_ok, create_app
 from common.db import (APPLIED_STEPS, finish_step, init_database, insert_rows, install_undo, one, require,
                        start_step, transaction)
 
@@ -69,8 +69,10 @@ def create_customer(inp: CustomerIn):
 @APP.get("/customers/{customer_id}")
 def get_customer(customer_id: int):
     with transaction() as cur:
-        return customer_body(require(cur, "customer", "SELECT * FROM customer_info WHERE customer_id=%s",
+        body = customer_body(require(cur, "customer", "SELECT * FROM customer_info WHERE customer_id=%s",
                                      customer_id))
+    spend = call_ok("sales", "GET", f"/internal/customers/{customer_id}/spend")  # CR2: sales owns the tier rule
+    return {**body, "tier": spend["tier"], "spend_12m": spend["spend_12m"]}
 
 
 # --- internal calls ------------------------------------------------------------------
@@ -108,10 +110,35 @@ def add_points(customer_id: int, inp: PointsIn):
         return {"customer_id": customer_id, "reward_points": int(customer["rewards"] or 0)}
 
 
+@APP.post("/internal/customers/{customer_id}/points/take-back")
+def take_back_points(customer_id: int, inp: PointsIn):
+    """Step take_back_points (CR2): subtract the points, never below 0; the
+    receipt keeps the points actually taken."""
+    with transaction() as cur:
+        earlier = start_step(cur, "take_back_points")
+        customer = require(cur, "customer", "SELECT * FROM customer_info WHERE customer_id=%s FOR UPDATE",
+                           customer_id)
+        if earlier is not None:
+            taken = earlier["points"]
+        else:
+            taken = min(inp.points, max(int(customer["rewards"] or 0), 0))
+            cur.execute("UPDATE customer_info SET rewards = COALESCE(rewards,0) - %s WHERE customer_id=%s",
+                        (taken, customer_id))
+            finish_step(cur, "take_back_points", {"customer_id": customer_id, "points": taken})
+            customer = one(cur, "SELECT * FROM customer_info WHERE customer_id=%s", customer_id)
+        return {"customer_id": customer_id, "points_taken": taken, "reward_points": int(customer["rewards"] or 0)}
+
+
 def reverse_points(cur, changes) -> None:
     if changes:
         cur.execute("UPDATE customer_info SET rewards = COALESCE(rewards,0) - %s WHERE customer_id=%s",
                     (changes["points"], changes["customer_id"]))
 
 
-install_undo(APP, {"add_points": reverse_points})
+def reverse_take_back(cur, changes) -> None:
+    if changes:
+        cur.execute("UPDATE customer_info SET rewards = COALESCE(rewards,0) + %s WHERE customer_id=%s",
+                    (changes["points"], changes["customer_id"]))
+
+
+install_undo(APP, {"add_points": reverse_points, "take_back_points": reverse_take_back})

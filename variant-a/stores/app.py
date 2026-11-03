@@ -104,7 +104,7 @@ def close_register(register: int, inp: CloseIn):
             "gross_total": float(money(totals["gross_total"])), "tax_total": float(money(totals["tax_total"])),
             "refunds_total": float(refunds), "cash_sales": float(cash_sales),
             "opening_cash": float(opening), "cash_expected": float(expected),
-            "counted_cash": float(counted), "difference": float(counted - expected)}
+            "counted_cash": float(counted), "difference": float(counted - expected), "vat": totals["vat"]}
 
 
 def reopen(register: int, sid: int) -> None:

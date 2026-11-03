@@ -87,7 +87,7 @@ def get_products(ids: str = Query(...)):
             p = require(cur, f"product {product_id}", "SELECT * FROM product_inventory WHERE product_id=%s",
                         product_id)
             result.append({"product_id": product_id, "unit_price": float(money(p["unit_price"])),
-                           "cost": float(money(p["cost"])), "in_stock": p["in_stock"]})
+                           "cost": float(money(p["cost"])), "in_stock": p["in_stock"], "category": p["productType"]})
     return result
 
 

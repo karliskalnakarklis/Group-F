@@ -1181,3 +1181,43 @@ and leaves the points briefly too high.
 **Language, new names:** VAT rate (`vat_rates`, `sale_lines.vat_rate`), VAT
 per rate (`sale_vat` in till, `sale_entry_vat` in reporting), spend entry
 (`spend_entries`), tier (rule in customers, stored on the sale in till).
+
+### Decisions taken by the agent (version 2)
+
+Decisions the design left open, taken while implementing version 2. Please
+review.
+
+#### Variant A
+
+- **Types of the new columns.** `vat_table.vat_rate`, `item_list.vat_rate`
+  and `ticket_vat` use `DECIMAL` (rates `DECIMAL(6,4)`, amounts
+  `DECIMAL(12,2)`), not the legacy `float`, so that rates can be grouped and
+  VAT sums add up to the cent. `vat_table` has the codes `reduced` (0.026)
+  and `standard` (0.081); `vat_category` lists the seven reduced categories.
+- **Defaults for sales without a customer:** `ticket_system.tier` is null and
+  `ticket_system.points_rate` is `0`. `item_list.vat_rate` has the default
+  `0` so that the column could be added to the legacy table.
+- **Index:** `ticket_system` gets an index on `customer_id`, for the spend
+  query.
+- **Spend:** sales computes `spend_12m` as the sum of `total` of the
+  customer's sales dated in [today − 364 days, today] minus the `refunds` of
+  the returns of those sales (by the date of the sale). At checkout "today"
+  is the date when sales reads the spend, just before `take_stock`.
+- **Points taken back:** sales computes `floor(refund_amount) ×
+  points_rate` of the sale and sends it in `{ points }`; people caps it at
+  the customer's balance and keeps what it actually subtracted
+  (`points_taken`) in the receipt. The refund for the call is computed in
+  the checks and again under the lock, from the same lines and prices.
+- **`tax_total`** in the session totals and the sales report is still the sum
+  of the sales' `tax`; this equals the sum of the `vat` values, because the
+  `tax` of every sale is the sum of its stored `vat` entries.
+- **`POST /customers`** answers as in version 1, without `tier` and
+  `spend_12m` (CR2 adds them to `GET /customers/{id}`); this saves a call to
+  sales when a customer is registered.
+- **Unused:** `tax_table` keeps its data and the helper `tax_rate()` stays,
+  so that fewer lines change.
+- **Legacy customers** start with a spend of `0` (the seed has no sales
+  history); their legacy `rewards` stay.
+- **No migration:** new tables and columns are created by the schema at start
+  (`CREATE TABLE IF NOT EXISTS`), so they exist only in a fresh database;
+  `make up-a` resets all data.
