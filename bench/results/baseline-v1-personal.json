@@ -1,0 +1,5 @@
+{"stack": "baseline", "level": "v1", "measured_at": "2026-11-03T21:12:44+00:00", "search_terms": 23,
+ "stores_with_personal_data": 1, "stores_total": 1,
+ "stores": [
+  {"store": "legacy-db", "owner": "gateway", "personal_data": true, "terms_found": 23, "tables": ["customer_info","employee_info"]}
+ ]}

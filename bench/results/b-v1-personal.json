@@ -1,0 +1,8 @@
+{"stack": "b", "level": "v1", "measured_at": "2026-11-03T21:12:28+00:00", "search_terms": 23,
+ "stores_with_personal_data": 1, "stores_total": 4,
+ "stores": [
+  {"store": "customers-db", "owner": "customers", "personal_data": true, "terms_found": 14, "tables": ["customers"]},
+  {"store": "purchasing-db", "owner": "purchasing", "personal_data": false, "terms_found": 0, "tables": []},
+  {"store": "reporting-db", "owner": "reporting", "personal_data": false, "terms_found": 0, "tables": []},
+  {"store": "till-db", "owner": "till", "personal_data": false, "terms_found": 0, "tables": []}
+ ]}
