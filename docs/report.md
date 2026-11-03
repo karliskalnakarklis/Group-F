@@ -26,7 +26,7 @@ conformance checks (A: 43, B: 26 passed).
 | C2 | Spread of the change requests: service folders changed `v1` → `v2` (lines added + deleted) | – | – | – | 4 (200) | 4 (311) | [`change-impact.md`](../bench/results/change-impact.md) |
 | C3 | Checkout latency: p95 in ms (hops) | 6.6 (0) | 36.7 (7) | 19.8 (3) | 31.9 (7) | 24.6 (3) | [`a-v1-bench.json`](../bench/results/a-v1-bench.json), [`b-v1-bench.json`](../bench/results/b-v1-bench.json), [`a-v2-bench.json`](../bench/results/a-v2-bench.json), [`b-v2-bench.json`](../bench/results/b-v2-bench.json), [`baseline-v1-bench.json`](../bench/results/baseline-v1-bench.json) |
 | C4 | Spread of personal data: data stores with personal data (lower is better) | 1 of 1 | 1 of 4 | 1 of 4 | 1 of 4 | 1 of 4 | [`a-v1-personal.json`](../bench/results/a-v1-personal.json), [`b-v1-personal.json`](../bench/results/b-v1-personal.json), [`a-v2-personal.json`](../bench/results/a-v2-personal.json), [`b-v2-personal.json`](../bench/results/b-v2-personal.json), [`baseline-v1-personal.json`](../bench/results/baseline-v1-personal.json) |
-| C5 | Reports reconcile: level 1 to 3 (higher is better) | | | | | | *to do: rating by both members* |
+| C5 | Reports reconcile: level 1 to 3 (higher is better) | | | | | | *to do: agreed level; ratings below in "C5 in detail"* |
 
 **C1 in detail.** In A, checkout fails when any one of the eight containers
 is stopped, because sales calls stores, people and inventory on every
@@ -78,6 +78,46 @@ employees at all: till and purchasing know an employee only by
 record has no password. No other store in B holds a copy of customer data,
 not even reporting's ledger. The change requests added no personal data in
 either variant.
+
+**C5 in detail.** Each member rates both variants on their own, from
+[`design.md`](design.md) and the code, on the scale in
+[`criteria.md`](criteria.md); then we agree on one level.
+
+| Variant | Karlis `v1` | Karlis `v2` | Bozhidar `v1` | Bozhidar `v2` | Agreed `v1` | Agreed `v2` |
+|---------|-------------|-------------|---------------|---------------|-------------|-------------|
+| A | 2 | 2 | | | | |
+| B | 2 | 2 | | | | |
+
+*Karlis's reasons:*
+
+- **A, level 2.** Both reports are computed in sales from the same tables,
+  so they cannot drift apart in normal operation. They can disagree through
+  one documented race: a sale or return that checked "session open" just
+  before the close and commits after stores has read the totals is missing
+  from the Z-report, but counts in the sales report
+  ([`design.md`](design.md), variant A "Failure behaviour"). It can also
+  happen through a documented failure: if the call for the totals fails and
+  the session cannot be reopened (finding A4). Both can be found from the
+  stored data: the sale is stored with a session whose `close_time` is
+  before the sale.
+- **B, level 2.** The Z-report is computed in till, with the shift row
+  locked, so A's race cannot happen. The sales report reads reporting's
+  copies, but till delivers each entry in the same request, before it
+  answers `201` ([`till/app.py`](../variant-b/till/app.py), `deliver` right
+  after the commit). So in normal operation the copy is already there. The
+  reports can disagree only in the milliseconds between till's commit and
+  the delivery, or while reporting is down or slow; then the entries wait in
+  till's outbox and are sent within seconds. Every missing entry is visible
+  as an undelivered row in `ledger_outbox`. A delivery twice changes nothing
+  (fixed before `v1`, finding B1).
+- **Not level 3 for either**, because one failure (sales in A, reporting in
+  B) or one order of requests (A) can make the reports disagree.
+- **`v2` does not change the level.** In both variants the VAT per rate is
+  stored once per sale and both reports add up the stored values: in A from
+  `ticket_vat`, in B from `sale_vat` in till and its copy in reporting.
+- **Same in both, not counted:** a shift that runs over midnight has its
+  sales split over two days in the sales report but not in the Z-report.
+  This comes from the contract, not from the cut.
 
 ## 3. How far the change requests spread
 
@@ -183,7 +223,10 @@ employee data at all, while A keeps the full legacy employee records. The
 metric counts stores, not what they hold, so it does not show this
 difference.
 
-**C5.** Not rated yet.
+**C5.** Not agreed yet. Karlis rates both variants at level 2, at `v1`
+and `v2` (section 2), which would make it a tie: A's risk is a race at the
+close, B's is a delay while reporting is down, and both can be found from the
+stored data.
 
 **Changes after `criteria-v1`.** One change, recorded in
 [`criteria.md`](criteria.md): the script for C4 (`bench/personal_data.sh`) is
