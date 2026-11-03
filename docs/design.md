@@ -1,6 +1,20 @@
 # Design
 
-## Decisions common to both variants
+The design has two parts:
+
+- [Version 1](#version-1-the-contract-as-it-is): the contract as it is,
+  for variants A and B. Tagged `v1`.
+- [Version 2](#version-2-the-change-requests): only the changes for CR1 and
+  CR2. Tagged `v2`.
+
+Version 1 ends with the decisions the agent took while implementing it;
+the agent adds the same for version 2 at the end of that part.
+
+---
+
+## Version 1: the contract as it is
+
+### Decisions common to both variants
 
 | Decision | Choice | Reason |
 |----------|--------|--------|
@@ -13,7 +27,7 @@
 | Call log | Shared code in `common/` in the variant folder. It logs every incoming request and outgoing call to `/logs/<service>.jsonl` and passes `X-Request-Id` and `X-Step-Key` on. | One implementation, the same in every service. |
 | Seed data | Each service reads `/shared/seed.json` at start and loads only its own data. | Contract. No seed data in the code. |
 
-### Receipts and undo
+#### Receipts and undo
 
 The problem: the leader asks another service to change data (for example
 take stock). The change is committed, but the answer arrives too late, so
@@ -63,7 +77,7 @@ The rule, the same in both variants, implemented once in `common/`:
   own changes. `step_key` and `request_id` are IDs, not copies. It is not preparation for
   the change requests either.
 
-### Conventions for calls between services
+#### Conventions for calls between services
 
 - The gateway passes every contract request unchanged, on the same method and
   path, to the leader of the use case (see the use case table of the
@@ -98,7 +112,7 @@ The rule, the same in both variants, implemented once in `common/`:
   that step of the request in `X-Step-Key`, following "Receipts and undo".
   It is the same code in every service, in `common/`.
 
-### Policy for the change requests
+#### Policy for the change requests
 
 We do **not** prepare for CR1 and CR2 in v1. Version 1 implements only the
 contract as it is: no extra tables, columns, fields or endpoints for VAT or
@@ -109,11 +123,14 @@ Preparing would hide that and make v1 more complex. The service cuts were
 chosen knowing the roadmap; that cannot be avoided and is the same for both
 variants.
 
+How version 2 implements CR1 and CR2 is described in its own part at the end:
+[Version 2: the change requests](#version-2-the-change-requests).
+
 ---
 
-## Variant A: data-aligned
+### Variant A: data-aligned
 
-### Services
+#### Services
 
 | Service | Responsibility | Owns (legacy tables) | Store |
 |---------|----------------|----------------------|-------|
@@ -123,7 +140,7 @@ variants.
 | inventory | products, stock, vendors, purchase orders | `product_inventory`, `vendorinfo`, `orders_ticket`, `orders` | `inventory-db` |
 | sales | sales, returns, gift cards, tax rate, sales report | `ticket_system`, `cart_inprogress`, `item_list`, `ticket_gift_payment`, `return_table`, `return_items`, `gift_card`, `tax_table` | `sales-db` |
 
-### Components
+#### Components
 
 ```mermaid
 flowchart LR
@@ -138,7 +155,7 @@ flowchart LR
     sales --> sadb[(sales-db)]
 ```
 
-### Use case flows
+#### Use case flows
 
 All calls are synchronous HTTP. The gateway only routes: every contract
 endpoint goes to exactly one service, the **leader** of that use case, which
@@ -170,7 +187,7 @@ steps, and fail when the other service is down.
 | Goods receipt | `POST /purchase-orders/{id}/receipt` | inventory | people | [Goods receipt](#goods-receipt) |
 | Sales report | `GET /reports/sales` | sales | stores | [Sales report](#sales-report) |
 
-#### Checkout
+##### Checkout
 
 Use case: a cashier sells products at an open register, optionally to a
 customer, paid with cash, card and/or gift cards. Endpoint `POST /sales`.
@@ -202,7 +219,7 @@ sequenceDiagram
     G-->>C: 201 sale
 ```
 
-#### Look up a sale
+##### Look up a sale
 
 Use case: show a past sale (receipt) with its lines and payments. Endpoint
 `GET /sales/{id}`. A sale stores only its register session
@@ -223,7 +240,7 @@ sequenceDiagram
     G-->>C: 200 sale
 ```
 
-#### Return
+##### Return
 
 Use case: a customer brings back products of an earlier sale at an open
 register (not necessarily the register of the sale) and gets a cash refund.
@@ -250,7 +267,7 @@ sequenceDiagram
     G-->>C: 201 return
 ```
 
-#### Open a register
+##### Open a register
 
 Use case: an employee opens a register session with a cash float at the
 start of a shift. Endpoint `POST /registers/{r}/open`.
@@ -269,7 +286,7 @@ sequenceDiagram
     G-->>C: 201 session
 ```
 
-#### Close a register (Z-report)
+##### Close a register (Z-report)
 
 Use case: an employee closes the register session at the end of a shift,
 enters the counted cash and gets the Z-report. Endpoint
@@ -298,7 +315,7 @@ sequenceDiagram
     G-->>C: 200 Z-report
 ```
 
-#### Create a purchase order
+##### Create a purchase order
 
 Use case: an employee orders products from a vendor. Endpoint
 `POST /purchase-orders`.
@@ -319,7 +336,7 @@ sequenceDiagram
     G-->>C: 201 purchase order
 ```
 
-#### Goods receipt
+##### Goods receipt
 
 Use case: an employee confirms that an ordered delivery arrived; the ordered
 quantities go into stock. Endpoint `POST /purchase-orders/{id}/receipt`.
@@ -339,7 +356,7 @@ sequenceDiagram
     G-->>C: 200 purchase order
 ```
 
-#### Sales report
+##### Sales report
 
 Use case: the head office sees the sales, refunds and top products of one
 store over a date range. Endpoint `GET /reports/sales`. Which register
@@ -361,7 +378,7 @@ sequenceDiagram
     G-->>C: 200 report
 ```
 
-### Service APIs
+#### Service APIs
 
 The contract endpoints are served by their leader (see the use case table).
 These are the internal calls between services. They follow "Conventions for
@@ -411,7 +428,7 @@ registers of the store, open and closed.
 |------|---------|--------|--------|------|---------|
 | `GET /internal/sessions/{session_id}/totals` | none | `200` `{ session_id, sales_count, gross_total, tax_total, cash_sales, refunds_total }` | none: a session without sales answers zeros | none (read only) | stores (Z-report) |
 
-### All-or-nothing
+#### All-or-nothing
 
 We follow the shared rule: checks first, then the writes in other services,
 then the leader's own transaction. If a step fails, the earlier writes are
@@ -448,7 +465,7 @@ undone in reverse order.
   `applied_steps` (see "Receipts and undo" in the common decisions). An undo
   after a timeout follows the same rule as after an error.
 
-### Failure behaviour
+#### Failure behaviour
 
 | What fails | What happens | Why this is acceptable or not |
 |------------|--------------|-------------------------------|
@@ -461,7 +478,7 @@ undone in reverse order.
 
 ---
 
-## Variant B: capability-aligned
+### Variant B: capability-aligned
 
 The services follow what Frischwerk does, not the legacy tables: selling at
 the till, assortment and purchasing, customers and loyalty, and sales
@@ -483,7 +500,7 @@ broker, the leader pattern, "Receipts and undo" with `applied_steps`, the
 "Conventions for calls between services", 2 s per call between services,
 20 s at the gateway, and no preparation for the change requests in v1.
 
-### Services
+#### Services
 
 | Service | Capability (bounded context) | Owns (its own model) | Copies of data from others (source, how kept current) | Store |
 |---------|------------|----------------------|--------------------------------------------------------|-------|
@@ -493,7 +510,7 @@ broker, the leader pattern, "Receipts and undo" with `applied_steps`, the
 | customers | **Customers and loyalty**: customer profiles, reward points | customers (first and last name, email, phone, street, zip code, city, reward points; no legacy password, no US state), `applied_steps` | none | `customers-db` |
 | reporting | **Sales reporting** for head office and finance | the sales ledger: sale entries with their lines, refund entries | **Sale and refund entries** (source: till; delivered by a transactional outbox over HTTP, see "Ledger delivery"). **Store list** (source: store administration; loaded from the seed at start) | `reporting-db` |
 
-### Components
+#### Components
 
 ```mermaid
 flowchart LR
@@ -516,7 +533,7 @@ Networks: each store shares a network only with its owner (`till-net`,
 application services share the network `backend`. Only the gateway publishes
 a port (`8000:8000`).
 
-### Use case flows
+#### Use case flows
 
 All calls are synchronous HTTP. The gateway only routes: every contract
 endpoint goes to exactly one service, the **leader** of that use case, which
@@ -585,7 +602,7 @@ Use cases without a diagram, in detail:
   products by quantity sold (sum of the sale entry lines, not reduced by
   returns), highest first, ties by the lower `product_id`, as in the monolith.
 
-#### Look up a product
+##### Look up a product
 
 Use case: show a product with its price, cost and stock. Endpoint
 `GET /products/{id}`. The product master is in purchasing, stock on hand is in
@@ -607,7 +624,7 @@ sequenceDiagram
     G-->>C: 200 product
 ```
 
-#### Checkout (B)
+##### Checkout (B)
 
 Use case: a cashier sells products at an open register, optionally to a
 customer, paid with cash, card and/or gift cards. Endpoint `POST /sales`.
@@ -654,7 +671,7 @@ sequenceDiagram
     G-->>C: 201 sale
 ```
 
-#### Return (B)
+##### Return (B)
 
 Use case: a customer brings back products of an earlier sale at an open
 register (not necessarily the register of the sale) and gets a cash refund.
@@ -688,7 +705,7 @@ sequenceDiagram
 The refund entry carries the store of the **return's** register, as the
 contract says.
 
-#### Goods receipt (B)
+##### Goods receipt (B)
 
 Use case: an employee confirms that an ordered delivery arrived; the ordered
 quantities go into stock. Endpoint `POST /purchase-orders/{id}/receipt`. The
@@ -711,7 +728,7 @@ sequenceDiagram
     G-->>C: 200 purchase order
 ```
 
-#### Price list refresh and ledger retry (background)
+##### Price list refresh and ledger retry (background)
 
 ```mermaid
 sequenceDiagram
@@ -724,7 +741,7 @@ sequenceDiagram
     Note over T: delivered on 200,<br/>if it fails: stop, try again next round
 ```
 
-### Service APIs
+#### Service APIs
 
 The contract endpoints are served by their leader (see the use case table).
 These are the internal calls between services. They follow "Conventions for
@@ -781,7 +798,7 @@ never undone, so reporting keeps no receipts and has no `/internal/undo`.
 `applied_steps` exists in `till-db` and `customers-db`: the services whose
 changes on request of another service can be undone.
 
-### Ledger delivery to reporting
+#### Ledger delivery to reporting
 
 A transactional outbox over HTTP, without a broker:
 
@@ -808,7 +825,7 @@ A transactional outbox over HTTP, without a broker:
 - The number of undelivered rows in the outbox is the visible size of the gap
   while reporting is down.
 
-### Language
+#### Language
 
 Inside every service the names follow the business. The gateway and the
 contract keep the contract names (`sale_id`, `session_id`, `register`,
@@ -838,7 +855,7 @@ contract keep the contract names (`sale_id`, `session_id`, `register`,
 Money columns are `DECIMAL(12,2)`; rates are `DECIMAL(6,4)`. Phone numbers
 and zip codes are strings in customers.
 
-### Copies
+#### Copies
 
 | Copy | Kept in | Source | How it is kept current | How stale it can be |
 |------|---------|--------|------------------------|---------------------|
@@ -848,7 +865,7 @@ and zip codes are strings in customers.
 | store list | reporting | store administration (outside the PoS) | loaded from the seed at start | never changes in the contract |
 | sale entries, refund entries | reporting | till | transactional outbox, delivered right after the commit and retried every 2 s | normally none: delivered before the `201` is sent; while reporting is down, until it is back (a few seconds after) |
 
-### All-or-nothing
+#### All-or-nothing
 
 We follow the shared rule: checks first, then the writes in other services,
 then the leader's own transaction. If a step fails, the earlier writes are
@@ -882,7 +899,7 @@ undone in reverse order.
   `customers-db` (`earn_points`), following "Receipts and undo" in the common decisions. An
   undo after a timeout follows the same rule as after an error.
 
-### Failure behaviour
+#### Failure behaviour
 
 | What fails | What happens | Why this is acceptable or not |
 |------------|--------------|-------------------------------|
@@ -893,7 +910,7 @@ undone in reverse order.
 | a sale or return runs while its register is closed | Cannot happen: the close locks the shift row, every sale and return takes a shared lock on it and checks again that the shift is open. | – |
 | an undo fails (the owner is down when the undo is sent) | As in variant A: the leader logs an error, and the data may stay half done (for example points earned for a sale that does not exist, or stock received for an order that is still open). | Known gap, accepted for this assignment, same as A. A timeout alone does not leave data half done (see "Receipts and undo"). |
 
-### Why this cut
+#### Why this cut
 
 Granularity drivers (Ford et al., *Software Architecture: The Hard Parts*,
 ch. 7): disintegrators pull a service apart, integrators pull it together.
@@ -920,200 +937,11 @@ ch. 7): disintegrators pull a service apart, integrators pull it together.
   writes into till; the report reads a copy that lags while reporting is down;
   a sale with a customer needs customers.
 
-### Version 2 (CR1, CR2)
-
-Version 2 implements CR1 (Swiss VAT) and CR2 (loyalty tiers) from
-`docs/change-requests.md`. Everything above stays as it is unless this
-subsection changes it. The cut does not change: no new service, store or
-network. There is one new call between services: till → customers on a
-return (take back points).
-
-#### Who owns what (v2)
-
-| Data or rule | Owner | Why |
-|--------------|-------|-----|
-| VAT rates by category (`vat_rates`) | till | VAT belongs to selling: the till prices the sale. |
-| product category | purchasing (product master) | It is a property of the product. till keeps a copy next to the price, in its price list. |
-| VAT per rate of a sale (`sale_vat`), VAT rate of a sale line (`sale_lines.vat_rate`) | till | Part of the sale. Stored once, rounded, so that every later sum uses exactly the same numbers and nothing depends on today's rates. |
-| VAT per rate of a ledger entry (`sale_entry_vat`) | reporting | Part of the ledger entry, delivered with it from till's outbox. |
-| loyalty rule: spend, tier, points per CHF (`spend_entries`) | customers | The loyalty context. Spend, tier and points are computed there, never in till. |
-| tier of a sale (`sales.tier`) | till | The tier that applied is part of the sale: the sale body shows it, and a return needs it. customers answers it, till stores it. |
-
-#### Data changes (v2)
-
-| Service | Change |
-|---------|--------|
-| purchasing | No table changes. `GET /internal/price-list` also answers `category` (the product's `category`, legacy `productType`). |
-| till | `price_list` gets `category` (loaded from the seed's `productType` at start, refreshed with the price list every 60 s). New table `vat_rates` (`category → rate`). `sale_lines` gets `vat_rate`. New table `sale_vat` (`sale_id`, `rate`, `net`, `vat`, `gross`). `sales` gets `tier` (null without a customer). `tax_rates` stays in place but is no longer used, so that as few lines as possible change. |
-| customers | New table `spend_entries` (`entry_id`, `customer_id`, `sale_date`, `amount`). New step `take_back_points` in `applied_steps`. |
-| reporting | New table `sale_entry_vat` (`sale_id`, `rate`, `net`, `vat`, `gross`). |
-
-**Decision: the VAT rates come from the change request, not from the
-seed.** The seed has only the US `tax_table`. till fills `vat_rates` at start
-with the reduced rate `0.026` for Dairy, Produce, Beef, Poultry, Pasta,
-DryGoods and PetFood, and the standard rate `0.081` for every other category.
-
-#### Rules (CR1)
-
-- `unit_price` is gross (VAT included). Each sale line stores the VAT rate of
-  its product's category at the time of the sale (`vat_rate`).
-- `line_total = qty × unit_price`; `total` = sum of the line totals.
-- Per rate: `gross` = sum of the line totals at that rate,
-  `vat = gross × rate / (1 + rate)` rounded half up to 0.01,
-  `net = gross - vat`. `tax` = sum of the `vat` values,
-  `subtotal = total - tax`.
-- The sale body gets `vat`: one entry `{ rate, net, vat, gross }` per rate
-  that occurs, lowest rate first. till stores these entries in `sale_vat`
-  in the sale's transaction; every later sum (sale lookup, Z-report, ledger)
-  uses these stored numbers.
-- Return: `refund_amount` = sum of `qty × unit_price` from the sale (gross).
-- Z-report: `vat` summed per rate over the shift's sales (not reduced by
-  returns); `tax_total` = sum of those `vat` values.
-- Ledger: the outbox payload of a sale also carries its `vat` entries;
-  reporting stores them in `sale_entry_vat`. The sales report gets the same
-  `vat` field, summed per rate over the store's sales in the range;
-  `tax_total` = sum of those `vat` values.
-
-#### Rules (CR2)
-
-- customers keeps a spend record per customer (`spend_entries`). A sale adds
-  `+total` with its sale date. A return adds `-refund_amount` with the date of
-  the **original sale**, so that
-  `spend_12m` = sum of the entries whose `sale_date` is in
-  [today − 364 days, today] (Europe/Zurich), which is CR2's "sales of the last
-  365 days minus the returns of those sales".
-- Tier, from the spend **before** the sale: `bronze` below 500, `silver` 500
-  to below 2000, `gold` 2000 and more. Points per full CHF: 1, 2, 3.
-- Checkout: `points_earned = floor(total) × points per CHF of the tier`. The
-  sale body gets `tier` (null without a customer).
-- Return: the customer loses `floor(refund_amount) × points per CHF of the
-  original sale's tier` points, never below 0.
-- `GET /customers/{id}` answers two new fields: `tier` and `spend_12m`.
-
-#### Use cases that change (v2)
-
-| Use case | What changes | Leader | Other services called |
-|----------|--------------|--------|-----------------------|
-| Checkout | VAT per rate; the earn call sends the sale date and answers the tier; the sale stores `tier` and `sale_vat`; the ledger payload carries `vat` | till | customers (only with `customer_id`), reporting (ledger delivery after commit) |
-| Return | gross refund; with a customer, points and spend are taken back first | till | **customers (new, only if the sale has a customer)**, reporting (ledger delivery after commit) |
-| Look up a sale | body gets `vat` (from `sale_vat`) and `tier` | till | none |
-| Close a register (Z-report) | `vat` per rate from `sale_vat`, `tax_total` = sum of the `vat` values | till | none |
-| Sales report | `vat` per rate from `sale_entry_vat`, `tax_total` = sum of the `vat` values | reporting | none |
-| Look up a customer | body gets `tier` and `spend_12m` | customers | none |
-| Price list refresh (background) | also copies `category` | till | purchasing |
-
-#### Checkout (B, v2)
-
-```mermaid
-sequenceDiagram
-    participant C as Client
-    participant G as gateway
-    participant T as till
-    participant CU as customers
-    participant R as reporting
-    C->>G: POST /sales
-    G->>T: POST /sales
-    Note over T: checks 1-7 without locks;<br/>totals from the VAT rate of each line's category:<br/>gross, vat, net per rate, tax, subtotal
-    T->>CU: earn points { total, sale_date } (if customer)
-    Note right of CU: step earn_points, customer row locked:<br/>404 customer, else tier from the spend before,<br/>points = floor(total) x rate of the tier,<br/>add points and spend entry
-    Note over T: one transaction, rows locked:<br/>shift still open (409 register),<br/>stock and gift cards checked again (409),<br/>sale with tier, lines with vat_rate, sale_vat,<br/>payments, stock, gift cards, ledger outbox row with vat<br/>(if earn or this fails: undo earn_points)
-    T->>R: ledger entry of the sale, with vat
-    Note right of R: if it fails: stays in the outbox, retried
-    T-->>G: 201 sale (vat, tier)
-    G-->>C: 201 sale
-```
-
-#### Return (B, v2)
-
-```mermaid
-sequenceDiagram
-    participant C as Client
-    participant G as gateway
-    participant T as till
-    participant CU as customers
-    participant R as reporting
-    C->>G: POST /returns
-    G->>T: POST /returns
-    Note over T: checks: sale, register, open shift,<br/>employee, lines and quantities;<br/>refund_amount = sum of qty x unit_price (gross)
-    T->>CU: take back points { refund_amount, tier, sale_date }<br/>(only if the sale has a customer)
-    Note right of CU: step take_back_points, customer row locked:<br/>404 customer, else subtract<br/>floor(refund) x rate of the sale's tier (never below 0),<br/>add spend entry -refund_amount at the sale's date
-    Note over T: one transaction, rows locked:<br/>shift still open (409 register),<br/>quantities checked again (409 return),<br/>return, lines, stock back, ledger outbox row<br/>(if take back or this fails: undo take_back_points)
-    T->>R: ledger entry of the refund
-    Note right of R: if it fails: stays in the outbox, retried
-    T-->>G: 201 return
-    G-->>C: 201 return
-```
-
-`tier` and `sale_date` come from till's own sale row, so customers needs no
-record of individual sales.
-
-#### Internal APIs that changed or were added (v2)
-
-`make impact` counts changed lines, not changed interfaces, so they are listed
-here.
-
-| Call | v1 | v2 | Step | Used by |
-|------|----|----|------|---------|
-| `GET purchasing /internal/price-list` | answer `[ { product_id, unit_price } ]` | answer `[ { product_id, unit_price, category } ]` | none (read only) | till (refresh every 60 s) |
-| `POST customers /internal/customers/{id}/earn` | request `{ total }`, answer `{ customer_id, points_earned, reward_points }` | request `{ total, sale_date }`, answer `{ customer_id, tier, points_earned, reward_points }` | `earn_points` | till (checkout) |
-| `POST customers /internal/customers/{id}/take-back` | – (new) | request `{ refund_amount, tier, sale_date }`, answer `{ customer_id, points_taken_back, reward_points }`; `404 customer not found` | `take_back_points` (new) | till (return) |
-| `POST customers /internal/undo` | steps: `earn_points` | steps: `earn_points`, `take_back_points` | shared | till |
-| `POST reporting /internal/ledger/sales` | `{ sale_id, store, date, total, tax, lines }` | `{ sale_id, store, date, total, tax, lines, vat: [ { rate, net, vat, gross } ] }` | none (idempotent by `sale_id`) | till (after a checkout, and the outbox retry) |
-
-The ledger outbox payload of a sale is the same body as the ledger call, so
-it gets `vat` too. The contract endpoints change only as CR1 and CR2 say
-(`vat` and `tier` on a sale, `vat` on the Z-report and the sales report,
-`tier` and `spend_12m` on a customer).
-
-Receipts: the `changes` of `earn_points` are
-`{ customer_id, points, tier, spend_entry_id }`; its undo subtracts the
-points and deletes the spend entry. The `changes` of `take_back_points` are
-`{ customer_id, points, spend_entry_id }`, where `points` is what was
-actually subtracted (it can be less than asked, because points never go below
-0); its undo adds these points back and deletes the spend entry.
-
-#### Copies (v2)
-
-| Copy | Kept in | Source | How it is kept current | How stale it can be |
-|------|---------|--------|------------------------|---------------------|
-| price list (`product_id → unit_price, category`) | till | purchasing | as in v1; the category is loaded from the seed at start and pulled with the price every 60 s | up to 60 s, longer while purchasing is down. No contract use case changes a price or a category. |
-
-#### All-or-nothing (v2)
-
-- **Checkout:** unchanged. `earn_points` now writes the points and the spend
-  entry in one transaction with its receipt; the undo reverses both.
-- **Return:** now has a write in another service, so it follows the leader
-  pattern like checkout (using `Steps`): checks first, then
-  `take_back_points` in customers (only if the sale has a customer), then
-  till's own transaction. If `take_back_points` fails or times out, or the
-  re-check or the transaction fails, till undoes `take_back_points` and
-  answers the error.
-- **Receipts:** `applied_steps` in `till-db` (`receive_stock`) and
-  `customers-db` (`earn_points`, `take_back_points`).
-
-#### Failure behaviour (v2), rows that change
-
-| What fails | What happens | Why this is acceptable or not |
-|------------|--------------|-------------------------------|
-| customers or `customers-db` | A sale **with** a customer fails (`503`), and now also a **return of a sale with a customer** (`503`, nothing changed). Sales without a customer, returns of sales without a customer, register open and close keep working. Customer endpoints fail. | Acceptable for sales, as in v1. For returns it is a cost of CR2: a refund without taking back the points would leave the customer with points for goods they returned. The cashier can still refund a customer's sale once customers is back. Making the take-back asynchronous (an outbox to customers, like the ledger) would avoid the outage, at the cost of a second outbox and points that are briefly too high; not chosen for v2. |
-| purchasing or `purchasing-db` | As in v1. A changed category reaches till's copy only with the next successful pull. | Acceptable: no contract use case changes a category. |
-
-#### Language (v2)
-
-| Name | Meaning | Service |
-|------|---------|---------|
-| VAT rate (`vat_rates`, `sale_lines.vat_rate`) | the rate of a product category; the rate that applied to a sale line | till |
-| VAT per rate (`sale_vat`, `sale_entry_vat`) | `{ rate, net, vat, gross }` of a sale, stored rounded | till, reporting |
-| spend entry (`spend_entries`) | `+total` of a sale or `-refund_amount` of a return, at the sale's date | customers |
-| tier | `bronze`, `silver`, `gold`, from the 12-month spend before a sale | customers (rule), till (on the sale) |
-
----
-
-## Decisions taken by the agent
+### Decisions taken by the agent (version 1)
 
 Decisions the design left open, taken while implementing. Please review.
 
-### Both variants
+#### Both variants
 
 - **Receipt row first.** A step writes its `applied_steps` row (`done`, no
   changes yet) as the first statement of its transaction and fills in
@@ -1135,7 +963,7 @@ Decisions the design left open, taken while implementing. Please review.
 - **Call log:** an outgoing call that times out or cannot connect is logged
   with `status` `503`. `path` is logged without the query string.
 
-### Variant A
+#### Variant A
 
 - **Gift card balance** is checked against the sum of all payments with that
   card (contract: "several payments with the same card count together"),
@@ -1152,7 +980,7 @@ Decisions the design left open, taken while implementing. Please review.
 - **Reward points:** with a customer, `add_points` is called even when
   `floor(total)` is `0`.
 
-### Variant B
+#### Variant B
 
 - **Isolation level in till.** till's database sessions run with
   `READ COMMITTED` (compose variable `DB_ISOLATION`, read in `common/db.py`).
@@ -1181,37 +1009,175 @@ Decisions the design left open, taken while implementing. Please review.
   (`ai-log/findings.md`, B1): reporting keys ledger entries on `sale_id` /
   `return_id` and has no receipts and no undo.
 
-### Variant B (v2)
+---
 
-- **Standard VAT rate** is stored in `vat_rates` as the row with category
-  `*`. A category without its own row gets the `*` rate. The rates are a
-  constant in till's code (from CR1), written into `vat_rates` at start.
-- **`sales.tax_rate` is replaced by `sales.tier`** in the same column
-  position. v1 needed the rate for the refund; with gross prices (CR1) the
-  refund does not need it. The table `tax_rates` and the helper `tax_rate()`
-  stay in the code, unused, so that fewer lines change.
-- **The sale's time is taken before the `earn` call**, not inside till's
-  transaction, so that the spend entry in customers and the sale have the
-  same date (also at midnight). `sold_at` is therefore a few milliseconds
-  earlier than the commit.
-- **The 12-month window** for the tier at checkout ends at the sale date that
-  till sends; `GET /customers/{id}` uses today in Europe/Zurich.
-- **`tax_total`** in the Z-report and the sales report is still the sum of
-  the sales' `tax`. This equals the sum of the `vat` values, because the
-  `tax` of every sale is the sum of its stored `vat` entries.
-- **`POST /customers`** answers `tier` and `spend_12m` as well (the same body
-  as `GET /customers/{id}`; a new customer is `bronze` with `0`).
-- **Answer of `take-back`:** `{ customer_id, points_taken_back,
-  reward_points }`, where `points_taken_back` is what was actually subtracted.
-- **Return in till:** till's own transaction is opened before the
-  `take_back_points` call (`with Steps() as steps, transaction() as cur:`), so
-  that the v1 transaction block keeps its indentation and fewer lines change.
-  The connection holds no lock during the call; the first lock is the shared
-  lock on the shift, taken after the call. `refund_amount` is computed in the
-  checks for the call and again under the lock, from the same lines and
-  prices.
-- **Legacy customers** start with a spend of `0` (the seed has no sales
-  history); their legacy `reward_points` stay.
-- **No migration:** the new tables and columns are created by the schema at
-  start (`CREATE TABLE IF NOT EXISTS`), so they exist only in a fresh
-  database. `make up-b` resets all data, so this is always the case here.
+## Version 2: the change requests
+
+Everything above is version 1. This part lists only what **changes** for CR1
+(Swiss VAT) and CR2 (loyalty tiers) from
+[`change-requests.md`](change-requests.md). Everything else stays as in
+version 1. Where the two disagree, this part wins. Decisions the agent takes
+for version 2 go in a new subsection "Decisions taken by the agent
+(version 2)" at the end of this part.
+
+### Common to both variants
+
+The rules themselves (VAT per rate, refund, spend, tiers, points) are in
+`change-requests.md` and are not repeated here. These are our decisions on
+top of them:
+
+- **A sale stores its VAT per rate.** The Z-report and the sales report add
+  up these stored values; they do not recompute VAT from summed lines, so
+  they match the receipts to the cent.
+- **A sale stores the tier that applied**, so a return takes points back at
+  the rate of that sale without recomputing the tier.
+- **Taking points back is a step with a receipt** that keeps the points
+  actually taken (after the cap at 0), so the undo gives back exactly those.
+- **The VAT rates and categories** are new data from CR1, written by the
+  owning service when it creates its tables, not loaded from the seed.
+- **Accepted:** two sales of one customer at the same moment may both use
+  the tier from before either of them.
+
+### Variant A: changes for version 2
+
+**The tier rule lives in sales**, because spend is computed from sales and
+returns, which sales owns. people keeps the points balance and asks sales for
+tier and spend; it keeps no copy ("one source for every fact").
+
+| Service | CR1: Swiss VAT | CR2: loyalty tiers |
+|---------|----------------|--------------------|
+| gateway | none | none |
+| inventory | `GET /internal/products` also answers `category` | none |
+| sales | VAT tables, VAT per line and per sale, `vat` in the sales report and the session totals | spend, tier, points by tier, points taken back on return, new call for the spend |
+| stores | passes `vat` from sales into the Z-report | none |
+| people | none | `GET /customers/{id}` asks sales for `tier` and `spend_12m`; new step `take_back_points` |
+
+This table is also our hypothesis for `make impact`: the gateway and
+`common/` should not change.
+
+**New data in `sales-db`:**
+
+- `vat_table` (`vat_code`, `vat_rate`) and `vat_category` (`productType`,
+  `vat_code`): the rates and reduced categories of CR1, rule 2; a category
+  not in `vat_category` is `standard`.
+- `ticket_vat` (`ticket_id`, `vat_rate`, `net`, `vat`, `gross`): written in
+  the sale's transaction.
+- New columns: `item_list.vat_rate` (the rate of the line, part of the
+  transaction, not a copy of the category), `ticket_system.tier`,
+  `ticket_system.points_rate`.
+- `ticket_system.tax_rate` is written as `0`. `tax_table` keeps its data, but
+  nothing reads it.
+
+**Changed use cases:**
+
+- **Checkout:** same calls as v1. The VAT rate of a line comes from the
+  category in the products answer. With a customer, sales reads the spend
+  from its own tables before `take_stock` and sends the tier-based points
+  with `add_points`.
+- **Return:** if the sale has a customer, sales calls `take_back_points` in
+  people after `give_stock_back`. If that or sales' own transaction fails, it
+  undoes `take_back_points`, then `give_stock_back`.
+- **Look up a customer:** people checks the customer (404), then asks sales
+  for `spend_12m` and `tier`.
+- **Z-report and sales report:** same flows; `vat` is summed from
+  `ticket_vat`.
+
+**Internal calls, new or changed:**
+
+| Call | Answer | Step | Used by |
+|------|--------|------|---------|
+| people `POST /internal/customers/{id}/points/take-back` `{ points }` (new) | `{ customer_id, points_taken, reward_points }`, `404 customer not found` | `take_back_points` | sales (return) |
+| inventory `GET /internal/products?ids=…` (changed) | adds `category` | none | sales (checkout) |
+| sales `GET /internal/sessions/{id}/totals` (changed) | adds `vat: [ { rate, net, vat, gross } ]` | none | stores (Z-report) |
+| sales `GET /internal/customers/{id}/spend` (new) | `{ customer_id, spend_12m, tier }` | none | people (look up a customer) |
+
+**Failure behaviour, what changes:** if sales is down, a customer lookup now
+fails too (`503`), because people needs the spend from sales. That is the
+price of not copying the spend. people now calls sales, but never in a
+request in which sales calls people, so no request waits on itself.
+
+### Variant B: changes for version 2
+
+**The loyalty rule lives in customers**, the loyalty context: spend, tier and
+points are computed there, never in till. customers keeps its own spend
+record, fed by till's calls, so it never asks till. The VAT rates live in
+till, because selling prices the sale; the category stays a property of the
+product in purchasing, and till keeps a copy next to the price. The cut does
+not change: no new service, store or network. One new call: till →
+customers on a return.
+
+| Service | CR1: Swiss VAT | CR2: loyalty tiers |
+|---------|----------------|--------------------|
+| gateway | none | none |
+| till | VAT rates, `category` in its price list copy, VAT per line and per sale, `vat` in the Z-report and in the ledger payload | stores the tier of a sale; `earn` sends the sale date; new take-back call on a return |
+| purchasing | `GET /internal/price-list` also answers `category` | none |
+| customers | none | spend record, tier, points by tier, `tier` and `spend_12m` on the customer, new step `take_back_points` |
+| reporting | stores the `vat` of each sale entry, `vat` in the sales report | none |
+
+This table is also our hypothesis for `make impact`: the gateway and
+`common/` should not change.
+
+**New data:**
+
+- till: `vat_rates` (`category → rate`): the reduced categories of CR1,
+  rule 2, plus one row `*` for the standard rate, which any other category
+  gets; written at start;
+  `price_list.category` (part of the copy, see below); `sale_lines.vat_rate`;
+  `sale_vat` (`sale_id`, `rate`, `net`, `vat`, `gross`); `sales.tier` (null
+  without a customer). `tax_rates` is no longer used.
+- customers: `spend_entries` (`entry_id`, `customer_id`, `sale_date`,
+  `amount`). A sale adds `+total`, a return adds `-refund_amount`, both dated
+  with the **original sale's** date. So `spend_12m` = sum of the entries with
+  `sale_date` in the 365-day window, which is exactly CR2's "sales of the
+  last 365 days minus the returns of those sales".
+- reporting: `sale_entry_vat` (`sale_id`, `rate`, `net`, `vat`, `gross`).
+
+**Changed use cases:**
+
+- **Checkout:** same calls as v1. till fixes the sale's date before `earn`,
+  so the sale and its spend entry have the same date, also at midnight.
+  `earn` sends that date and answers the tier; the 12-month window ends at
+  that date (`GET /customers/{id}` uses today). customers computes the tier
+  from the spend before the sale, adds the points and the spend entry in one
+  transaction with the receipt. till stores
+  `tier`, `sale_vat` and the line rates; the ledger payload carries `vat`.
+- **Return:** if the sale has a customer, till calls `take_back_points`
+  before its own transaction, with `tier` and `sale_date` from its own sale
+  row (customers keeps no record of single sales). This follows the leader
+  pattern like checkout: if the call or till's transaction fails, till undoes
+  `take_back_points`.
+- **Look up a sale, Z-report:** `vat` from `sale_vat`, local in till.
+- **Sales report:** `vat` from `sale_entry_vat`, local in reporting.
+- **Look up a customer:** local in customers.
+- **Price list refresh:** also copies `category`.
+
+**Internal calls, new or changed:**
+
+| Call | Change | Step | Used by |
+|------|--------|------|---------|
+| purchasing `GET /internal/price-list` (changed) | answer adds `category` | none | till (refresh every 60 s) |
+| customers `POST /internal/customers/{id}/earn` (changed) | request adds `sale_date`, answer adds `tier` | `earn_points` | till (checkout) |
+| customers `POST /internal/customers/{id}/take-back` (new) | request `{ refund_amount, tier, sale_date }`, answer `{ customer_id, points_taken_back, reward_points }`, `404 customer not found` | `take_back_points` | till (return) |
+| reporting `POST /internal/ledger/sales` (changed) | request adds `vat: [ { rate, net, vat, gross } ]` | none | till (after a checkout, and the outbox retry) |
+
+Receipts: `earn_points` keeps `{ customer_id, points, tier, spend_entry_id }`;
+its undo subtracts the points and deletes the spend entry.
+`take_back_points` keeps `{ customer_id, points, spend_entry_id }`, with the
+points actually subtracted; its undo adds them back and deletes the spend
+entry.
+
+**Copies, what changes:** till's price list becomes `product_id →
+unit_price, category`. The category is loaded from the seed at start and
+pulled with the price every 60 s; it can be as stale as the price. No
+contract use case changes a category.
+
+**Failure behaviour, what changes:** if customers is down, a return of a
+sale **with** a customer now fails too (`503`, nothing changed); other
+returns keep working. Accepted: a refund without taking the points back would
+leave the customer with points for returned goods. Not chosen: an outbox to
+customers like the ledger, which avoids the outage but needs a second outbox
+and leaves the points briefly too high.
+
+**Language, new names:** VAT rate (`vat_rates`, `sale_lines.vat_rate`), VAT
+per rate (`sale_vat` in till, `sale_entry_vat` in reporting), spend entry
+(`spend_entries`), tier (rule in customers, stored on the sale in till).
