@@ -903,3 +903,48 @@ ch. 7): disintegrators pull a service apart, integrators pull it together.
 - **Price of the cut:** a product lookup needs two services; goods receipt
   writes into till; the report reads a copy that lags while reporting is down;
   a sale with a customer needs customers.
+
+---
+
+## Decisions taken by the agent
+
+Decisions the design left open, taken while implementing. Please review.
+
+### Both variants
+
+- **Receipt row first.** A step writes its `applied_steps` row (`done`, no
+  changes yet) as the first statement of its transaction and fills in
+  `changes` at the end. If the row already exists, the step reads it: `done`
+  answers as before, `undone` answers `409 step <step> of this request was
+  cancelled`. An undo likewise tries to insert an `undone` row first and only
+  reads the existing row on a duplicate key. Reason: a locking read of a
+  missing row takes a gap lock in InnoDB, and a step and its undo arriving at
+  the same moment would deadlock; inserting first makes one of them wait for
+  the other instead.
+- **Undo of an unknown step name** answers `422`. If the undo transaction
+  deadlocks three times in a row it answers `500` (the design says an undo
+  always answers `200`; this only covers a database failure).
+- **Gateway:** a path whose first segment belongs to no use case answers
+  `404 not found`. If the leader does not answer within 20 s, the gateway
+  answers `503 "<leader> unavailable"`, the same as when it cannot connect.
+- **Unexpected errors** in any service answer `500 {"detail": "internal
+  error"}` and are still written to the call log.
+- **Call log:** an outgoing call that times out or cannot connect is logged
+  with `status` `503`. `path` is logged without the query string.
+
+### Variant A
+
+- **Gift card balance** is checked against the sum of all payments with that
+  card (contract: "several payments with the same card count together"),
+  both in the early check and again under the row lock. The monolith checks
+  each payment on its own.
+- **Open and close of a register** lock the `store_registers` row
+  `FOR UPDATE`, so that two opens (or an open and a close) of one register run
+  one after the other.
+- **Indexes** were added to legacy tables where the services look rows up by
+  a column other than the primary key (`registers_table.register_num`,
+  `ticket_system.register_id`, `cart_inprogress.ticket_id`, `item_list.CID`,
+  `ticket_gift_payment.ticket_id`, `return_table.ticket_id` and
+  `.register_id`, `return_items.RTID`). Table and column names are unchanged.
+- **Reward points:** with a customer, `add_points` is called even when
+  `floor(total)` is `0`.

@@ -1,0 +1,121 @@
+# Variant A: data-aligned. Start it with 'make up-a'.
+# Four application services, each with its own MariaDB, plus the gateway.
+name: pos
+
+x-app: &app
+  volumes:
+    - ../shared:/shared:ro
+    - calllogs:/logs
+  healthcheck:
+    test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+    interval: 2s
+    timeout: 3s
+    retries: 60
+
+x-db: &db
+  image: mariadb:11.4
+  environment:
+    MARIADB_DATABASE: pos
+    MARIADB_USER: pos
+    MARIADB_PASSWORD: pos
+    MARIADB_ROOT_PASSWORD: root
+  healthcheck:
+    test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+    interval: 2s
+    retries: 60
+
+services:
+  gateway:
+    <<: *app
+    build: { context: ., dockerfile: gateway/Dockerfile }
+    environment:
+      SERVICE_NAME: gateway
+    ports: ["8000:8000"]
+    networks: [backend]
+    depends_on:
+      people: { condition: service_healthy }
+      stores: { condition: service_healthy }
+      inventory: { condition: service_healthy }
+      sales: { condition: service_healthy }
+
+  people:
+    <<: *app
+    build: { context: ., dockerfile: people/Dockerfile }
+    environment:
+      SERVICE_NAME: people
+      DB_HOST: people-db
+      SEED_PATH: /shared/seed.json
+    labels:
+      pos.tables: customer_info,employee_info
+    networks: [backend, people-net]
+    depends_on:
+      people-db: { condition: service_healthy }
+
+  stores:
+    <<: *app
+    build: { context: ., dockerfile: stores/Dockerfile }
+    environment:
+      SERVICE_NAME: stores
+      DB_HOST: stores-db
+      SEED_PATH: /shared/seed.json
+    labels:
+      pos.tables: stores,store_registers,registers_table
+    networks: [backend, stores-net]
+    depends_on:
+      stores-db: { condition: service_healthy }
+
+  inventory:
+    <<: *app
+    build: { context: ., dockerfile: inventory/Dockerfile }
+    environment:
+      SERVICE_NAME: inventory
+      DB_HOST: inventory-db
+      SEED_PATH: /shared/seed.json
+    labels:
+      pos.tables: product_inventory,vendorinfo,orders_ticket,orders
+    networks: [backend, inventory-net]
+    depends_on:
+      inventory-db: { condition: service_healthy }
+
+  sales:
+    <<: *app
+    build: { context: ., dockerfile: sales/Dockerfile }
+    environment:
+      SERVICE_NAME: sales
+      DB_HOST: sales-db
+      SEED_PATH: /shared/seed.json
+    labels:
+      pos.tables: ticket_system,cart_inprogress,item_list,ticket_gift_payment,return_table,return_items,gift_card,tax_table
+    networks: [backend, sales-net]
+    depends_on:
+      sales-db: { condition: service_healthy }
+
+  people-db:
+    <<: *db
+    labels: { pos.role: store, pos.owner: people }
+    networks: [people-net]
+
+  stores-db:
+    <<: *db
+    labels: { pos.role: store, pos.owner: stores }
+    networks: [stores-net]
+
+  inventory-db:
+    <<: *db
+    labels: { pos.role: store, pos.owner: inventory }
+    networks: [inventory-net]
+
+  sales-db:
+    <<: *db
+    labels: { pos.role: store, pos.owner: sales }
+    networks: [sales-net]
+
+volumes:
+  calllogs:
+
+networks:
+  backend:
+  people-net:
+  stores-net:
+  inventory-net:
+  sales-net:
